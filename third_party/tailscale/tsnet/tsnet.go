@@ -216,6 +216,7 @@ type Server struct {
 	ExitBBRInitialCwnd, ExitBBRPacingBurst  int
 	ExitBBRBurstWindow                      time.Duration
 	ExitBBRRateLimit                        int64
+	ExitBBRQuiet                            bool
 	// Dir specifies the name of the directory to use for
 	// state. If empty, a directory is selected automatically
 	// under os.UserConfigDir (https://golang.org/pkg/os/#UserConfigDir).
@@ -712,6 +713,15 @@ func (s *Server) WriteExitPacket(p []byte) error {
 	return s.sys.Tun.Get().InjectOutbound(p)
 }
 
+// BeginExitTCPShutdown starts rejecting new TCP connections and resets
+// existing ones on a running exit server. Call before closing its transports.
+func (s *Server) BeginExitTCPShutdown() int {
+	if s.netstack == nil {
+		return 0
+	}
+	return s.netstack.BeginTCPShutdown()
+}
+
 // TailscaleIPs returns IPv4 and IPv6 addresses for this node. If the node
 // has not yet joined a tailnet or is otherwise unaware of its own IP addresses,
 // the returned ip4, ip6 will be !netip.IsValid().
@@ -901,7 +911,7 @@ func (s *Server) start() (reterr error) {
 		}
 		ns.ExitPacket = s.ExitPacket
 		sys.Tun.Get().NormalizeExitPacket = s.NormalizeExitPacket
-		if err := ns.ConfigureExit(s.ExitTCPCC, s.ExitTCPSendBuffer, s.ExitTCPReceiveBuffer, s.ExitBBRInitialCwnd, s.ExitBBRPacingBurst, s.ExitBBRBurstWindow, s.ExitBBRRateLimit); err != nil {
+		if err := ns.ConfigureExit(s.ExitTCPCC, s.ExitTCPSendBuffer, s.ExitTCPReceiveBuffer, s.ExitBBRInitialCwnd, s.ExitBBRPacingBurst, s.ExitBBRBurstWindow, s.ExitBBRRateLimit, s.ExitBBRQuiet); err != nil {
 			return err
 		}
 	}

@@ -57,6 +57,8 @@ dig @100.100.100.100 example.com AAAA
 
 常驻部署可使用仓库中的 systemd 单元。它以 `warp2tailscale` 用户运行，从 `/opt/warp2tailscale/exitnode` 启动，读取 `/etc/warp2tailscale/config.yaml`。配置内的相对路径以工作目录 `/var/lib/warp2tailscale` 为基准。首次注册与后续服务应使用同一个状态目录和服务用户。[systemd 单元](deploy/warp2tailscale.service)
 
+计划重启时，出口先拒绝新的 TCP 连接，再通过仍在线的 Tailscale 隧道向存续连接发送 RST。`tcp.shutdown_grace_period` 为报文送出和处理客户端响应预留时间，默认 2 秒。正常完成的 TCP 传输继续使用 FIN。断电、强制终止或链路丢包时，客户端仍可能超时。
+
 ## TCP 调优
 
 修改 YAML 后重启节点。缓冲区按连接设置，在客户端侧和 WARP 侧两个 TCP 栈上生效。拥塞算法和 BBR 参数作用于节点向 Tailscale 客户端发送数据的内层 TCP。[完整示例配置](config.example.yaml)
@@ -86,6 +88,6 @@ dig @100.100.100.100 example.com AAAA
 
 ## 验证
 
-`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
+`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
 
 本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE) 和 [usque](third_party/usque/LICENSE.md)。

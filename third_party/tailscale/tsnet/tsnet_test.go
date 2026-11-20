@@ -1653,6 +1653,50 @@ func (c *bufferedConn) Read(b []byte) (int, error) {
 	return c.reader.Read(b)
 }
 
+func TestExitTCPShutdown(t *testing.T) {
+	tstest.ResourceCheck(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	controlURL, _ := startControl(t)
+	server, ip, _ := startServer(t, ctx, controlURL, "exit")
+	client, _, _ := startServer(t, ctx, controlURL, "client")
+
+	entered := make(chan struct{}, 2)
+	resume := make(chan struct{})
+	defer close(resume)
+	server.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
+		return func(c net.Conn) {
+			defer c.Close()
+			entered <- struct{}{}
+			<-resume // Simulate a handler still waiting for its upstream dial.
+		}, true
+	})
+	addr := net.JoinHostPort(ip.String(), "8080")
+	conn, err := client.Dial(ctx, "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if count := server.BeginExitTCPShutdown(); count == 0 {
+		t.Fatal("no TCP endpoints found")
+	}
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || !strings.Contains(err.Error(), "reset") {
+		t.Fatalf("waiting client read: got %v, want reset", err)
+	}
+	if c, err := client.Dial(ctx, "tcp", addr); err == nil {
+		c.Close()
+		t.Fatal("accepted a new connection during shutdown")
+	} else if !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("new connection: got %v, want refusal", err)
+	}
+}
+
 func TestFallbackTCPHandler(t *testing.T) {
 	tstest.ResourceCheck(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

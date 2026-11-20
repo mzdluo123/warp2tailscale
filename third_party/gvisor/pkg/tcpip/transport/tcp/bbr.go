@@ -17,6 +17,7 @@ type BBRSettings struct {
 	InitialCwnd, PacingBurst int
 	BurstWindow              time.Duration
 	RateLimit                int64
+	Quiet                    bool // Skip per-flow diagnostic logging on the ACK path.
 }
 
 // ConfigureBBR sets defaults for future senders on this stack only.
@@ -181,7 +182,7 @@ func (b *bbrController) ack(n int, rtt time.Duration, snap *deliverySnapshot) {
 		rate = max(rate, b.rate)
 	}
 	b.rate = b.settings.limitRate(rate)
-	if previous != b.mode || b.acks == 1 || now.Sub(b.lastLog) >= time.Second {
+	if !b.settings.Quiet && (previous != b.mode || b.acks == 1 || now.Sub(b.lastLog) >= time.Second) {
 		log.Printf("flow=%v cc=bbr initial_cwnd=%d burst_mss=%d mode=%s min_rtt=%s btlbw_Bps=%.0f pacing_rate_Bps=%.0f cwnd=%d bytes_in_flight=%d acks=%d retransmits=%d paced_waits=%d last_send_gap=%s", b.s.ep.TransportEndpointInfo.ID, b.settings.InitialCwnd, b.settings.PacingBurst, b.mode, b.minRTT, b.bw, b.rate, b.s.SndCwnd, b.s.SndUna.Size(b.s.SndNxt), b.acks, b.retransmits, b.waits, b.gap)
 		b.lastLog = now
 	}

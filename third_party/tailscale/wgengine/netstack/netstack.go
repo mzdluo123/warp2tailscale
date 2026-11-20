@@ -158,8 +158,9 @@ func init() {
 // and implements wgengine.FakeImpl to act as a userspace network
 // stack when Tailscale is running in fake mode.
 type Impl struct {
-	restrictedExit bool
-	ExitPacket     func(*packet.Parsed) bool
+	restrictedExit  bool
+	exitTCPStopping atomic.Bool
+	ExitPacket      func(*packet.Parsed) bool
 	// GetTCPHandlerForFlow conditionally handles an incoming TCP flow for the
 	// provided (src/port, dst/port) 4-tuple.
 	//
@@ -455,6 +456,25 @@ func (ns *Impl) Close() error {
 	ns.ipstack.Wait()
 	ns.injectWG.Wait()
 	return nil
+}
+
+// BeginTCPShutdown rejects new forwarded handshakes and aborts live TCP
+// endpoints while the outbound pump and WireGuard are still running.
+func (ns *Impl) BeginTCPShutdown() int {
+	ns.exitTCPStopping.Store(true)
+	count := 0
+	for _, registered := range ns.ipstack.RegisteredEndpoints() {
+		ep, ok := registered.(*tcp.Endpoint)
+		if !ok {
+			continue
+		}
+		switch ep.EndpointState() {
+		case tcp.StateSynRecv, tcp.StateEstablished, tcp.StateCloseWait, tcp.StateFinWait1, tcp.StateFinWait2:
+			ep.Abort()
+			count++
+		}
+	}
+	return count
 }
 
 // SetTransportProtocolOption forwards to the underlying
@@ -1211,8 +1231,8 @@ func (ns *Impl) peerAPIPortAtomic(ip netip.Addr) *atomic.Uint32 {
 var viaRange = tsaddr.TailscaleViaRange()
 
 // ConfigureExit selects the client-facing stack's TCP algorithm before Start.
-func (ns *Impl) ConfigureExit(cc string, send, receive, iw, burst int, window time.Duration, rateLimit int64) error {
-	if err := tcp.ConfigureBBR(ns.ipstack, tcp.BBRSettings{InitialCwnd: iw, PacingBurst: burst, BurstWindow: window, RateLimit: rateLimit}); err != nil {
+func (ns *Impl) ConfigureExit(cc string, send, receive, iw, burst int, window time.Duration, rateLimit int64, quiet bool) error {
+	if err := tcp.ConfigureBBR(ns.ipstack, tcp.BBRSettings{InitialCwnd: iw, PacingBurst: burst, BurstWindow: window, RateLimit: rateLimit, Quiet: quiet}); err != nil {
 		return err
 	}
 	if err := tcp.SetBufferSizes(ns.ipstack, send, receive); err != nil {
@@ -1597,6 +1617,11 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		}
 	}()
 
+	if ns.exitTCPStopping.Load() {
+		r.Complete(true)
+		return
+	}
+
 	var wq waiter.Queue
 
 	// We can't actually create the endpoint or complete the inbound
@@ -1611,6 +1636,12 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 			return nil
 		}
 		r.Complete(false)
+		// Shutdown may have taken its endpoint snapshot during this handshake.
+		if ns.exitTCPStopping.Load() {
+			ep.Abort()
+			ep.Close()
+			return nil
+		}
 		for _, opt := range opts {
 			ep.SetSockOpt(opt)
 		}

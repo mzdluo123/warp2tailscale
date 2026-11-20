@@ -15,7 +15,7 @@ case ${1:-local} in
     CGO_ENABLED=0 go build -o bin/warp-smoke ./cmd/warp-smoke
     CGO_ENABLED=0 go build -tags mvptest -o bin/exitnode-test ./cmd/exitnode
     go test ./...
-    go test -count=1 -run "TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
+    go test -count=1 -run "TestExitTCPShutdown|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
     go test -count=1 -v -run 'TestBBR|TestDisconnect|TestEndpointBufferSelection' github.com/Diniboy1123/usque/bridge gvisor.dev/gvisor/pkg/tcpip/transport/tcp
     ;;
   smoke)

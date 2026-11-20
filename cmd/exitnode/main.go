@@ -32,12 +32,16 @@ import (
 )
 
 type config struct {
+	Logging struct {
+		QuietFlows bool `yaml:"quiet_flows"`
+	}
 	Runtime struct {
 		MaxProcs int `yaml:"max_procs"`
 	}
 	TCP struct {
-		Send    int `yaml:"send_buffer_bytes"`
-		Receive int `yaml:"receive_buffer_bytes"`
+		Send          int           `yaml:"send_buffer_bytes"`
+		Receive       int           `yaml:"receive_buffer_bytes"`
+		ShutdownGrace time.Duration `yaml:"shutdown_grace_period"`
 	}
 	Tailscale struct {
 		Hostname string
@@ -85,6 +89,9 @@ func load(path string) (config, error) {
 	return cfg, nil
 }
 func (cfg config) validate() error {
+	if cfg.TCP.ShutdownGrace < 0 {
+		return errors.New("tcp.shutdown_grace_period must be nonnegative")
+	}
 	if cfg.Warp.PacketQueue < 0 || cfg.Warp.PacketQueue > 256 {
 		return errors.New("WARP packet queue must be 0..256")
 	}
@@ -120,7 +127,8 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.Runtime.MaxProcs > 0 {
 		runtime.GOMAXPROCS(cfg.Runtime.MaxProcs)
 	}
-	s := &tsnet.Server{Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
+	traceFlows := !cfg.Logging.QuietFlows
+	s := &tsnet.Server{ExitBBRQuiet: cfg.Logging.QuietFlows, Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
 	up := make(chan struct{})
 	clientRoutes := func(ctx context.Context) ([]netip.Prefix, error) {
 		select {
@@ -148,7 +156,10 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.Policy.UDP == "all" || cfg.Policy.ICMP {
 		deliver = s.WriteExitPacket
 	}
-	warp, e := bridge.NewRouted(ctx, cfg.Warp.ConfigPath, cfg.TCP.Send, cfg.TCP.Receive, cfg.Warp.PacketQueue, clientRoutes, deliver)
+	// Keep both TCP legs alive until the Tailnet stack has issued its resets.
+	flowCtx, stopFlows := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopFlows()
+	warp, e := bridge.NewRouted(flowCtx, cfg.Warp.ConfigPath, cfg.TCP.Send, cfg.TCP.Receive, cfg.Warp.PacketQueue, clientRoutes, deliver)
 	if e != nil {
 		return e
 	}
@@ -188,6 +199,9 @@ func run(ctx context.Context, cfg config) error {
 	}
 	s.ExitDNSForward = func(ctx context.Context, q []byte, src netip.AddrPort) ([]byte, error) {
 		answer, err := exit.PeerDNS(ctx, q, warp.DialTCP)
+		if !traceFlows {
+			return answer, err
+		}
 		if err != nil {
 			log.Printf("WARP peer DNS src=%s: %v", src, err)
 		} else {
@@ -197,11 +211,24 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer s.Close()
 	defer warp.Close()
+	defer func() {
+		if ctx.Err() != nil {
+			count := s.BeginExitTCPShutdown()
+			grace := cfg.TCP.ShutdownGrace
+			if grace == 0 {
+				grace = 2 * time.Second
+			}
+			log.Printf("shutting down TCP: aborting %d endpoints, allowing %s for delivery", count, grace)
+			// Keep servicing peer ACKs and new SYNs during this window as well.
+			time.Sleep(grace)
+		}
+		stopFlows()
+	}()
 	var rejected atomic.Uint64
 	allow := func(proto string, src, dst netip.AddrPort) bool {
 		ready := warp.Ready()
 		ok := ready && policy.Allowed(dst) && (proto == "tcp" || dst.Port() == 53)
-		if !ok {
+		if !ok && traceFlows {
 			log.Printf("reject proto=%s src=%s dst=%s family=%s ready=%t rejects=%d", proto, src, dst, family(dst), ready, rejected.Add(1))
 		}
 		return ok
@@ -212,16 +239,22 @@ func run(ctx context.Context, cfg config) error {
 		}
 		return func(c net.Conn) {
 			defer c.Close()
-			u, e := warp.DialTCP(ctx, dst)
+			u, e := warp.DialTCP(flowCtx, dst)
 			if e != nil {
-				log.Printf("WARP TCP %s -> %s: %v", src, dst, e)
+				if traceFlows {
+					log.Printf("WARP TCP %s -> %s: %v", src, dst, e)
+				}
 				return
 			}
 			defer u.Close()
-			log.Printf("WARP TCP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
-			metrics.Buffers(c, u, src, dst)
-			up, down := exit.Relay(ctx, c, u)
-			metrics.TCP(c, src, dst, up, down)
+			if traceFlows {
+				log.Printf("WARP TCP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
+				metrics.Buffers(c, u, src, dst)
+			}
+			up, down := exit.Relay(flowCtx, c, u)
+			if traceFlows {
+				metrics.TCP(c, src, dst, up, down)
+			}
 		}, true
 	})
 	s.RegisterFallbackUDPHandler(func(src, dst netip.AddrPort) (func(nettype.ConnPacketConn), bool) {
@@ -232,13 +265,19 @@ func run(ctx context.Context, cfg config) error {
 			defer c.Close()
 			u, e := warp.DialUDP(dst)
 			if e != nil {
-				log.Printf("WARP UDP %s -> %s: %v", src, dst, e)
+				if traceFlows {
+					log.Printf("WARP UDP %s -> %s: %v", src, dst, e)
+				}
 				return
 			}
 			defer u.Close()
-			log.Printf("WARP UDP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
+			if traceFlows {
+				log.Printf("WARP UDP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
+			}
 			up, down := exit.DNS(c, u)
-			log.Printf("DNS %s -> %s up=%d down=%d", src, dst, up, down)
+			if traceFlows {
+				log.Printf("DNS %s -> %s up=%d down=%d", src, dst, up, down)
+			}
 		}, true
 	})
 	if _, e = s.Up(ctx); e != nil {

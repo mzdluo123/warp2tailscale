@@ -466,6 +466,7 @@ func (pk *PacketBuffer) DeepCopyForForwarding(reservedHeaderBytes int) *PacketBu
 	}
 
 	newPk.tuple = pk.tuple
+	newPk.NetworkPacketInfo.SourceFragmented = pk.NetworkPacketInfo.SourceFragmented
 
 	return newPk
 }

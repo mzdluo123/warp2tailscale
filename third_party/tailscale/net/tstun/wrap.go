@@ -173,6 +173,8 @@ type Wrapper struct {
 	// PreFilterPacketInboundFromWireGuard is the inbound filter function that runs before the main filter
 	// and therefore sees the packets that may be later dropped by it.
 	PreFilterPacketInboundFromWireGuard FilterFunc
+	// NormalizeExitPacket reassembles selected exit traffic before applying peer ACLs.
+	NormalizeExitPacket func(*packet.Parsed) bool
 	// PostFilterPacketInboundFromWireGuardAppConnector runs after the filter, but before PostFilterPacketInboundFromWireGuard.
 	// Non-app connector traffic is passed along. Invalid app connector traffic is dropped.
 	PostFilterPacketInboundFromWireGuardAppConnector FilterFunc
@@ -1193,6 +1195,9 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook pa
 		return filter.DropSilently, gro
 	}
 
+	if t.NormalizeExitPacket != nil && !t.NormalizeExitPacket(p) {
+		return filter.DropSilently, gro
+	}
 	if t.PreFilterPacketInboundFromWireGuard != nil {
 		if res := t.PreFilterPacketInboundFromWireGuard(p, t); res.IsDrop() {
 			return res, gro

@@ -180,6 +180,7 @@ func (f *Fragmentation) Process(
 
 	f.mu.Lock()
 	if f.reassemblers == nil {
+		f.mu.Unlock()
 		return nil, 0, false, fmt.Errorf("Release() called before fragmentation processing could finish")
 	}
 
@@ -294,6 +295,7 @@ func (f *Fragmentation) releaseReassemblersLocked() {
 
 // PacketFragmenter is the book-keeping struct for packet fragmentation.
 type PacketFragmenter struct {
+	forwarded          bool
 	transportHeader    []byte
 	data               buffer.Buffer
 	reserve            int
@@ -327,6 +329,7 @@ func MakePacketFragmenter(pkt *stack.PacketBuffer, fragmentPayloadLen uint32, re
 	fragmentCount := (uint32(fragmentableData.Size()) + fragmentPayloadLen - 1) / fragmentPayloadLen
 
 	return PacketFragmenter{
+		forwarded:          pkt.NetworkPacketInfo.IsForwardedPacket,
 		data:               fragmentableData,
 		reserve:            reserve,
 		fragmentPayloadLen: int(fragmentPayloadLen),
@@ -350,6 +353,7 @@ func (pf *PacketFragmenter) BuildNextFragment() (*stack.PacketBuffer, int, int, 
 
 	fragPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		ReserveHeaderBytes: pf.reserve,
+		IsForwardedPacket:  pf.forwarded,
 	})
 
 	// Copy data for the fragment.

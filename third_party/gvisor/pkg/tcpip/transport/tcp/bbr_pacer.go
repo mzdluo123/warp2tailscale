@@ -6,19 +6,26 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
-func (b *bbrController) canSend() bool {
+// sendBudget returns the remaining bytes in this pacing quantum. A GSO
+// aggregate consumes the same budget as individually serialized MSS packets.
+func (b *bbrController) sendBudget() int {
 	delay := b.nextSend.Sub(b.s.ep.stack.Clock().NowMonotonic())
 	// Allow a bounded quantum, then repay the entire serialization time.
 	// Idle connections cannot accumulate credits beyond one quantum.
 	allowance := time.Duration(float64(time.Second) * float64((b.settings.PacingBurst-1)*b.s.MaxPayloadSize) / b.rate)
+	if window := b.settings.BurstWindow; window > 0 {
+		allowance = min(allowance, window)
+	}
 	if delay <= allowance {
-		return true
+		mss := b.s.MaxPayloadSize
+		extra := int((allowance - max(0, delay)).Seconds() * b.rate / float64(mss))
+		return min(b.settings.PacingBurst, 1+extra) * mss
 	}
 	if !b.s.pacingTimer.enabled() {
 		b.s.pacingTimer.enable(delay)
 		b.waits++
 	}
-	return false
+	return 0
 }
 func (s *sender) pacingExpired() tcpip.Error {
 	if !s.pacingTimer.isUninitialized() && s.pacingTimer.checkExpiration() && s.ep.EndpointState().connected() {

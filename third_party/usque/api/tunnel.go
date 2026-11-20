@@ -74,6 +74,9 @@ type NetstackAdapter struct {
 }
 
 func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
+	if r, ok := n.dev.(interface{ ReadConnectIP([]byte) (int, error) }); ok {
+		return r.ReadConnectIP(buf)
+	}
 	packetBufsPtr := n.tunnelBufPool.Get().(*[][]byte)
 	sizesPtr := n.tunnelSizesPool.Get().(*[]int)
 
@@ -237,17 +240,16 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		go func() {
 			defer pumps.Done()
+			buf := packetBufferPool.Get()
+			defer packetBufferPool.Put(buf)
 			for {
-				buf := packetBufferPool.Get()
 				n, err := device.ReadPacket(buf)
 				if err != nil {
-					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
 					return
 				}
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
-					packetBufferPool.Put(buf)
 					if cfg.OpenDevice != nil || errors.As(err, new(*connectip.CloseError)) {
 						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
 						return
@@ -255,7 +257,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error writing to IP connection: %v, continuing...", err)
 					continue
 				}
-				packetBufferPool.Put(buf)
 
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {

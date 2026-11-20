@@ -40,10 +40,18 @@ case ${1:-local} in
       grep -Eq '^warp=(on|plus)$' <<<"$trace"
       answer=$(client dig +time=5 +tries=3 +noall +answer "@$resolver" example.com "$type")
       grep -E "[[:space:]]$type[[:space:]]" <<<"$answer"
+      if [[ ${EXIT_UDP_POLICY:-all} == all ]]; then
+        quic=$(client curl -q --http3-only --noproxy '*' --max-time 20 "-$fam" --resolve "www.cloudflare.com:443:$addr" -fsS https://www.cloudflare.com/cdn-cgi/trace -w 'http=%{http_version}\n')
+        grep -Eq '^warp=(on|plus)$' <<<"$quic"
+        grep -Fx 'http=3' <<<"$quic"
+      fi
+      if [[ ${EXIT_ICMP:-true} == true ]]; then
+        client ping "-$fam" -n -c 2 -W 3 "$resolver"
+      fi
     done
     client curl --noproxy '*' --max-time 20 --resolve dns.google:443:8.8.8.8 -fsS 'https://dns.google/resolve?name=example.com&type=A' | python3 -c 'import sys,json; assert json.load(sys.stdin)["Status"] == 0'
-    client python3 -c 'import socket; socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b"mvp-reject",("9.9.9.9",443))'
-    if [[ -n ${NODE_LOG:-} ]]; then
+    if [[ ${EXIT_UDP_POLICY:-all} == dns-only && -n ${NODE_LOG:-} ]]; then
+      client python3 -c 'import socket; socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b"policy-check",("9.9.9.9",443))'
       for _ in {1..30}; do
         grep -q 'reject proto=udp .*dst=9.9.9.9:443 ' "$NODE_LOG" && break
         sleep .1

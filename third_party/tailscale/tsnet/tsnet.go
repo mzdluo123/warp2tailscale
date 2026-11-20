@@ -181,6 +181,7 @@ import (
 	"tailscale.com/logtail/filch"
 	"tailscale.com/net/memnet"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/packet"
 	"tailscale.com/net/proxymux"
 	"tailscale.com/net/socks5"
 	"tailscale.com/net/tsdial"
@@ -203,6 +204,9 @@ import (
 //
 // Its exported fields may be changed until the first method call.
 type Server struct {
+	// ExitPacket optionally consumes an inbound, ACL-filtered exit packet.
+	ExitPacket          func(*packet.Parsed) bool
+	NormalizeExitPacket func(*packet.Parsed) bool
 	// ExitDNSForward handles an authenticated, permitted peer DNS query.
 	ExitDNSForward func(context.Context, []byte, netip.AddrPort) ([]byte, error)
 
@@ -210,6 +214,8 @@ type Server struct {
 	ExitTCPCC                               string
 	ExitTCPSendBuffer, ExitTCPReceiveBuffer int
 	ExitBBRInitialCwnd, ExitBBRPacingBurst  int
+	ExitBBRBurstWindow                      time.Duration
+	ExitBBRRateLimit                        int64
 	// Dir specifies the name of the directory to use for
 	// state. If empty, a directory is selected automatically
 	// under os.UserConfigDir (https://golang.org/pkg/os/#UserConfigDir).
@@ -698,6 +704,14 @@ func (s *Server) CertDomains() []string {
 	return slices.Clone(nm.DNS.CertDomains)
 }
 
+// WriteExitPacket delivers a routed reply to a tailnet peer.
+func (s *Server) WriteExitPacket(p []byte) error {
+	if err := s.Start(); err != nil {
+		return err
+	}
+	return s.sys.Tun.Get().InjectOutbound(p)
+}
+
 // TailscaleIPs returns IPv4 and IPv6 addresses for this node. If the node
 // has not yet joined a tailnet or is otherwise unaware of its own IP addresses,
 // the returned ip4, ip6 will be !netip.IsValid().
@@ -885,7 +899,9 @@ func (s *Server) start() (reterr error) {
 		if s.Tun != nil {
 			return errors.New("exit mode requires memory TUN")
 		}
-		if err := ns.ConfigureExit(s.ExitTCPCC, s.ExitTCPSendBuffer, s.ExitTCPReceiveBuffer, s.ExitBBRInitialCwnd, s.ExitBBRPacingBurst); err != nil {
+		ns.ExitPacket = s.ExitPacket
+		sys.Tun.Get().NormalizeExitPacket = s.NormalizeExitPacket
+		if err := ns.ConfigureExit(s.ExitTCPCC, s.ExitTCPSendBuffer, s.ExitTCPReceiveBuffer, s.ExitBBRInitialCwnd, s.ExitBBRPacingBurst, s.ExitBBRBurstWindow, s.ExitBBRRateLimit); err != nil {
 			return err
 		}
 	}

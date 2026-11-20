@@ -36,6 +36,8 @@ const (
 
 // Parsed is a minimal decoding of a packet suitable for use in filters.
 type Parsed struct {
+	// SourceFragmented marks packets normalized by a dedicated exit router.
+	SourceFragmented bool
 	// b is the byte buffer that this decodes.
 	b []byte
 	// subofs is the offset of IP subprotocol.
@@ -88,6 +90,7 @@ func (p *Parsed) String() string {
 // and shouldn't need any memory allocation.
 func (q *Parsed) Decode(b []byte) {
 	q.b = b
+	q.SourceFragmented = false
 	q.CaptureMeta = CaptureMeta{} // Clear any capture metadata if it exists.
 
 	if len(b) < 1 {

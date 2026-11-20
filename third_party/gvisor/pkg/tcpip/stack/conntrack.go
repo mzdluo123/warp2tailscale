@@ -271,8 +271,24 @@ func v6NetAndTransHdr(icmpPayload []byte, minTransHdrLen int) (header.Network, [
 	return netHdr, transHdr[:minTransHdrLen]
 }
 
-func getEmbeddedNetAndTransHeaders(pkt *PacketBuffer, netHdrLength int, getNetAndTransHdr netAndTransHeadersFunc, transProto tcpip.TransportProtocolNumber) (header.Network, header.ChecksummableTransport, bool) {
+func getEmbeddedNetAndTransHeaders(pkt *PacketBuffer, netHdrLength int, getNetAndTransHdr netAndTransHeadersFunc, transProto tcpip.TransportProtocolNumber) (header.Network, header.Transport, bool) {
 	switch transProto {
+	case header.ICMPv4ProtocolNumber, header.ICMPv6ProtocolNumber:
+		if h, ok := pkt.Data().PullUp(netHdrLength + 8); ok {
+			n, t := getNetAndTransHdr(h, 8)
+			if transProto == header.ICMPv4ProtocolNumber && netHdrLength >= 20 && h[0]>>4 == 4 {
+				v := header.ICMPv4(t)
+				if _, ok := v.IdentifierQuery(); ok {
+					return n, v, true
+				}
+			}
+			if transProto == header.ICMPv6ProtocolNumber && netHdrLength == 40 && h[0]>>4 == 6 {
+				v := header.ICMPv6(t)
+				if v.Type() == header.ICMPv6EchoRequest || v.Type() == header.ICMPv6EchoReply {
+					return n, v, true
+				}
+			}
+		}
 	case header.TCPProtocolNumber:
 		if netAndTransHeader, ok := pkt.Data().PullUp(netHdrLength + header.TCPMinimumSize); ok {
 			netHeader, transHeaderBytes := getNetAndTransHdr(netAndTransHeader, header.TCPMinimumSize)
@@ -306,7 +322,7 @@ func getHeaders(pkt *PacketBuffer) (netHdr header.Network, transHdr header.Trans
 		}
 
 		switch icmpType := icmpHeader.Type(); icmpType {
-		case header.ICMPv4Echo, header.ICMPv4EchoReply:
+		case header.ICMPv4Echo, header.ICMPv4EchoReply, header.ICMPv4Timestamp, header.ICMPv4TimestampReply, header.ICMPv4InfoRequest, header.ICMPv4InfoReply, header.ICMPv4AddressMaskRequest, header.ICMPv4AddressMaskReply:
 			return pkt.Network(), icmpHeader, false, true
 		case header.ICMPv4DstUnreachable, header.ICMPv4TimeExceeded, header.ICMPv4ParamProblem:
 		default:
@@ -377,11 +393,26 @@ func getTupleIDForRegularPacket(netHdr header.Network, netProto tcpip.NetworkPro
 
 func getTupleIDForPacketInICMPError(pkt *PacketBuffer, getNetAndTransHdr netAndTransHeadersFunc, netProto tcpip.NetworkProtocolNumber, netLen int, transProto tcpip.TransportProtocolNumber) (tupleID, bool) {
 	if netHdr, transHdr, ok := getEmbeddedNetAndTransHeaders(pkt, netLen, getNetAndTransHdr, transProto); ok {
+		src, dst := transHdr.SourcePort(), transHdr.DestinationPort()
+		switch v := transHdr.(type) {
+		case header.ICMPv4:
+			if request, _ := v.IdentifierQuery(); request {
+				src = v.Ident()
+			} else {
+				dst = v.Ident()
+			}
+		case header.ICMPv6:
+			if v.Type() == header.ICMPv6EchoRequest {
+				src = v.Ident()
+			} else {
+				dst = v.Ident()
+			}
+		}
 		return tupleID{
 			srcAddr:                   netHdr.DestinationAddress(),
-			srcPortOrEchoRequestIdent: transHdr.DestinationPort(),
+			srcPortOrEchoRequestIdent: dst,
 			dstAddr:                   netHdr.SourceAddress(),
-			dstPortOrEchoReplyIdent:   transHdr.SourcePort(),
+			dstPortOrEchoReplyIdent:   src,
 			transProto:                transProto,
 			netProto:                  netProto,
 		}, true
@@ -433,9 +464,9 @@ func getTupleID(pkt *PacketBuffer) (tupleID, getTupleIDDisposition) {
 		}
 
 		switch icmp.Type() {
-		case header.ICMPv4Echo:
+		case header.ICMPv4Echo, header.ICMPv4Timestamp, header.ICMPv4InfoRequest, header.ICMPv4AddressMaskRequest:
 			return getTupleIDForEchoPacket(pkt, icmp.Ident(), true /* request */), getTupleIDOKAndAllowNewConn
-		case header.ICMPv4EchoReply:
+		case header.ICMPv4EchoReply, header.ICMPv4TimestampReply, header.ICMPv4InfoReply, header.ICMPv4AddressMaskReply:
 			// Do not create a new connection in response to a reply packet as only
 			// the first packet of a connection should create a conntrack entry but
 			// a reply is never the first packet sent for a connection.

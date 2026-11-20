@@ -897,7 +897,7 @@ func (e *endpoint) writePacket(r *stack.Route, pkt *stack.PacketBuffer, protocol
 	}
 
 	if packetMustBeFragmented(pkt, networkMTU) {
-		if pkt.NetworkPacketInfo.IsForwardedPacket {
+		if pkt.NetworkPacketInfo.IsForwardedPacket && !pkt.NetworkPacketInfo.SourceFragmented {
 			// As per RFC 2460, section 4.5:
 			//   Unlike IPv4, fragmentation in IPv6 is performed only by source nodes,
 			//   not by routers along a packet's delivery path.

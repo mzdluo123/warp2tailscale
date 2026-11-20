@@ -4,8 +4,11 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
+
+var relayBuffers = sync.Pool{New: func() any { return new([32 << 10]byte) }}
 
 // Relay preserves TCP half-close while bounding the lifetime of a stalled peer.
 func Relay(ctx context.Context, a, b net.Conn) (int64, int64) {
@@ -13,7 +16,9 @@ func Relay(ctx context.Context, a, b net.Conn) (int64, int64) {
 	a.SetDeadline(deadline)
 	b.SetDeadline(deadline)
 	copyHalf := func(dst, src net.Conn, ch chan<- int64) {
-		n, err := io.Copy(dst, src)
+		buf := relayBuffers.Get().(*[32 << 10]byte)
+		n, err := io.CopyBuffer(dst, src, buf[:])
+		relayBuffers.Put(buf)
 		if err == nil {
 			if w, ok := dst.(interface{ CloseWrite() error }); ok {
 				err = w.CloseWrite()

@@ -11,15 +11,19 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/Diniboy1123/usque/bridge"
 	"gopkg.in/yaml.v3"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
 	"tailscale.com/ipn"
+	"tailscale.com/net/packet"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tsnet"
+	"tailscale.com/types/ipproto"
 	"tailscale.com/types/nettype"
 
 	"warp2tailscale/internal/exit"
@@ -28,29 +32,37 @@ import (
 )
 
 type config struct {
+	Runtime struct {
+		MaxProcs int `yaml:"max_procs"`
+	}
 	TCP struct {
 		Send    int `yaml:"send_buffer_bytes"`
 		Receive int `yaml:"receive_buffer_bytes"`
 	}
 	Tailscale struct {
 		Hostname string
+		Port     uint16
 		StateDir string `yaml:"state_dir"`
 	}
 	Warp struct {
 		ConfigPath     string `yaml:"config_path"`
 		Transport      string
+		PacketQueue    int `yaml:"packet_queue_packets"`
 		MTU            int
 		ReconnectDelay time.Duration `yaml:"reconnect_delay"`
 		FailClosed     bool          `yaml:"fail_closed"`
 	}
 	Congestion struct {
 		Type        string
-		Profile     string `yaml:"bbrProfile"`
-		InitialCwnd int    `yaml:"initial_cwnd_packets"`
-		PacingBurst int    `yaml:"pacing_burst_packets"`
+		Profile     string        `yaml:"bbrProfile"`
+		InitialCwnd int           `yaml:"initial_cwnd_packets"`
+		PacingBurst int           `yaml:"pacing_burst_packets"`
+		RateLimit   int64         `yaml:"max_pacing_bytes_per_second"`
+		BurstWindow time.Duration `yaml:"pacing_burst_window"`
 	}
 	Policy struct {
 		UDP        string
+		ICMP       bool
 		IPv4, IPv6 bool
 	}
 }
@@ -73,18 +85,30 @@ func load(path string) (config, error) {
 	return cfg, nil
 }
 func (cfg config) validate() error {
+	if cfg.Warp.PacketQueue < 0 || cfg.Warp.PacketQueue > 256 {
+		return errors.New("WARP packet queue must be 0..256")
+	}
+	if cfg.Runtime.MaxProcs < 0 {
+		return errors.New("runtime.max_procs must be nonnegative")
+	}
 	if iw := cfg.Congestion.InitialCwnd; iw != 0 && (iw < 4 || iw > 128) {
 		return errors.New("BBR initial cwnd must be 4..128 packets or 0 for default")
 	}
-	if burst := cfg.Congestion.PacingBurst; burst < 0 || burst > 16 {
-		return errors.New("BBR pacing burst must be 1..16 packets or 0 for default")
+	if burst := cfg.Congestion.PacingBurst; burst < 0 || burst > 32 {
+		return errors.New("BBR pacing burst must be 1..32 packets or 0 for default")
+	}
+	if cfg.Congestion.RateLimit < 0 {
+		return errors.New("negative max pacing rate")
+	}
+	if window := cfg.Congestion.BurstWindow; window < 0 || window > 10*time.Millisecond {
+		return errors.New("BBR pacing burst window must be 0..10ms")
 	}
 	for _, size := range []int{cfg.TCP.Send, cfg.TCP.Receive} {
 		if size != 0 && (size < 4096 || size > 64<<20) {
 			return fmt.Errorf("TCP buffer must be 0 or 4096..67108864 bytes (got %d)", size)
 		}
 	}
-	if cfg.Tailscale.Hostname == "" || cfg.Tailscale.StateDir == "" || cfg.Warp.ConfigPath == "" || cfg.Warp.Transport != "masque-h3" || cfg.Warp.MTU != 1280 || cfg.Warp.ReconnectDelay != time.Second || !cfg.Warp.FailClosed || cfg.Policy.UDP != "dns-only" || !cfg.Policy.IPv4 || !cfg.Policy.IPv6 || cfg.Congestion.Profile != "standard" || cfg.Congestion.Type != "bbr" && cfg.Congestion.Type != "cubic" && cfg.Congestion.Type != "reno" {
+	if cfg.Tailscale.Hostname == "" || cfg.Tailscale.StateDir == "" || cfg.Warp.ConfigPath == "" || cfg.Warp.Transport != "masque-h3" || cfg.Warp.MTU != 1280 || cfg.Warp.ReconnectDelay != time.Second || !cfg.Warp.FailClosed || (cfg.Policy.UDP != "dns-only" && cfg.Policy.UDP != "all") || !cfg.Policy.IPv4 || !cfg.Policy.IPv6 || cfg.Congestion.Profile != "standard" || cfg.Congestion.Type != "bbr" && cfg.Congestion.Type != "cubic" && cfg.Congestion.Type != "reno" {
 		return errors.New("unsupported configuration; see config.example.yaml")
 	}
 	return nil
@@ -93,11 +117,75 @@ func run(ctx context.Context, cfg config) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
-	warp, e := bridge.NewWithBuffers(ctx, cfg.Warp.ConfigPath, cfg.TCP.Send, cfg.TCP.Receive)
+	if cfg.Runtime.MaxProcs > 0 {
+		runtime.GOMAXPROCS(cfg.Runtime.MaxProcs)
+	}
+	s := &tsnet.Server{Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
+	up := make(chan struct{})
+	clientRoutes := func(ctx context.Context) ([]netip.Prefix, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-up:
+		}
+		v4, v6 := s.TailscaleIPs()
+		var routes []netip.Prefix
+		for _, ip := range []netip.Addr{v4, v6} {
+			if tsaddr.IsTailscaleIP(ip) {
+				bits := tsaddr.CGNATRange().Bits()
+				if ip.Is6() {
+					bits = tsaddr.TailscaleULARange().Bits()
+				}
+				routes = append(routes, netip.PrefixFrom(ip, bits))
+			}
+		}
+		if len(routes) == 0 {
+			return nil, errors.New("no tailnet router addresses")
+		}
+		return routes, nil
+	}
+	var deliver func([]byte) error
+	if cfg.Policy.UDP == "all" || cfg.Policy.ICMP {
+		deliver = s.WriteExitPacket
+	}
+	warp, e := bridge.NewRouted(ctx, cfg.Warp.ConfigPath, cfg.TCP.Send, cfg.TCP.Receive, cfg.Warp.PacketQueue, clientRoutes, deliver)
 	if e != nil {
 		return e
 	}
-	s := &tsnet.Server{Hostname: cfg.Tailscale.Hostname, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
+	if deliver != nil {
+		s.NormalizeExitPacket = func(p *packet.Parsed) bool {
+			proto, frag := ipfragment.Protocol(p.Buffer())
+			if !frag || !tsaddr.IsTailscaleIP(p.Src.Addr()) || !policy.Allowed(netip.AddrPortFrom(p.Dst.Addr(), 1)) {
+				return true
+			}
+			if !(proto == 17 && cfg.Policy.UDP == "all" || (proto == 1 || proto == 58) && cfg.Policy.ICMP) {
+				return true
+			}
+			joined := warp.JoinClientFragments(p.Buffer())
+			if joined == nil {
+				return false
+			}
+			p.Decode(joined)
+			p.SourceFragmented = true
+			return true
+		}
+		s.ExitPacket = func(p *packet.Parsed) bool {
+			switch p.IPProto {
+			case ipproto.UDP:
+				if cfg.Policy.UDP != "all" {
+					return false
+				}
+			case ipproto.ICMPv4, ipproto.ICMPv6:
+				if !cfg.Policy.ICMP {
+					return false
+				}
+			default:
+				return false
+			}
+			warp.ForwardPacket(p.Src.Addr(), p.Dst.Addr(), p.Buffer(), p.SourceFragmented)
+			return true
+		}
+	}
 	s.ExitDNSForward = func(ctx context.Context, q []byte, src netip.AddrPort) ([]byte, error) {
 		answer, err := exit.PeerDNS(ctx, q, warp.DialTCP)
 		if err != nil {
@@ -156,6 +244,7 @@ func run(ctx context.Context, cfg config) error {
 	if _, e = s.Up(ctx); e != nil {
 		return e
 	}
+	close(up)
 	lc, e := s.LocalClient()
 	if e != nil {
 		return e

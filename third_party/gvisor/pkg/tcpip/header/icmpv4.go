@@ -84,17 +84,19 @@ type ICMPv4Code byte
 
 // Typical values of ICMPv4Type defined in RFC 792.
 const (
-	ICMPv4EchoReply      ICMPv4Type = 0
-	ICMPv4DstUnreachable ICMPv4Type = 3
-	ICMPv4SrcQuench      ICMPv4Type = 4
-	ICMPv4Redirect       ICMPv4Type = 5
-	ICMPv4Echo           ICMPv4Type = 8
-	ICMPv4TimeExceeded   ICMPv4Type = 11
-	ICMPv4ParamProblem   ICMPv4Type = 12
-	ICMPv4Timestamp      ICMPv4Type = 13
-	ICMPv4TimestampReply ICMPv4Type = 14
-	ICMPv4InfoRequest    ICMPv4Type = 15
-	ICMPv4InfoReply      ICMPv4Type = 16
+	ICMPv4EchoReply          ICMPv4Type = 0
+	ICMPv4DstUnreachable     ICMPv4Type = 3
+	ICMPv4SrcQuench          ICMPv4Type = 4
+	ICMPv4Redirect           ICMPv4Type = 5
+	ICMPv4Echo               ICMPv4Type = 8
+	ICMPv4TimeExceeded       ICMPv4Type = 11
+	ICMPv4ParamProblem       ICMPv4Type = 12
+	ICMPv4Timestamp          ICMPv4Type = 13
+	ICMPv4TimestampReply     ICMPv4Type = 14
+	ICMPv4InfoRequest        ICMPv4Type = 15
+	ICMPv4InfoReply          ICMPv4Type = 16
+	ICMPv4AddressMaskRequest ICMPv4Type = 17
+	ICMPv4AddressMaskReply   ICMPv4Type = 18
 )
 
 // ICMP codes for ICMPv4 Time Exceeded messages as defined in RFC 792.
@@ -225,4 +227,16 @@ func ICMPv4Checksum(h ICMPv4, payloadCsum uint16) uint16 {
 	xsum = checksum.Checksum(h[4:], xsum)
 
 	return ^xsum
+}
+
+// IdentifierQuery classifies messages whose identifier demultiplexes a public IP shared by clients.
+func (b ICMPv4) IdentifierQuery() (request, ok bool) {
+	switch b.Type() {
+	case ICMPv4Echo, ICMPv4Timestamp, ICMPv4InfoRequest, ICMPv4AddressMaskRequest:
+		return true, true
+	case ICMPv4EchoReply, ICMPv4TimestampReply, ICMPv4InfoReply, ICMPv4AddressMaskReply:
+		return false, true
+	default:
+		return false, false
+	}
 }

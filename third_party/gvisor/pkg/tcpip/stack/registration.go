@@ -54,6 +54,8 @@ type TransportEndpointID struct {
 //
 // +stateify savable
 type NetworkPacketInfo struct {
+	// SourceFragmented permits re-fragmentation after NAT normalization.
+	SourceFragmented bool
 	// LocalAddressBroadcast is true if the packet's local address is a broadcast
 	// address.
 	LocalAddressBroadcast bool

@@ -1076,7 +1076,7 @@ func (s *sender) postXmit(dataSent bool, shouldScheduleProbe bool) {
 func (s *sender) sendData() {
 	limit := s.MaxPayloadSize
 	bbr, _ := s.cc.(*bbrController)
-	if s.gso && bbr == nil {
+	if s.gso {
 		limit = int(s.ep.gso.MaxSize - header.TCPTotalHeaderMaximumSize - 1)
 	}
 	end := s.SndUna.Add(s.SndWnd)
@@ -1108,10 +1108,15 @@ func (s *sender) sendData() {
 			s.updateWriteNext(seg.Next())
 			continue
 		}
-		if bbr != nil && !bbr.canSend() {
-			break
+		segmentLimit := limit
+		if bbr != nil {
+			budget := bbr.sendBudget()
+			if budget == 0 {
+				break
+			}
+			segmentLimit = min(segmentLimit, budget)
 		}
-		if sent := s.maybeSendSegment(seg, limit, end); !sent {
+		if sent := s.maybeSendSegment(seg, segmentLimit, end); !sent {
 			break
 		}
 		dataSent = true
@@ -1656,6 +1661,7 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 		s.SndUna = ack
 		bbr, _ := s.cc.(*bbrController)
 		var sample *deliverySnapshot
+		var snapshot deliverySnapshot
 		ackLeft := acked
 		originalOutstanding := s.Outstanding
 		for ackLeft > 0 {
@@ -1670,8 +1676,8 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 
 			datalen := seg.logicalLen()
 			if bbr != nil && seg.xmitCount == 1 && seg.delivery.valid {
-				snap := seg.delivery
-				sample = &snap
+				snapshot = seg.delivery
+				sample = &snapshot
 			}
 			if datalen > ackLeft {
 				prevCount := s.pCount(seg, s.MaxPayloadSize)

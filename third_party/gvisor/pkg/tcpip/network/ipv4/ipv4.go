@@ -790,7 +790,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	}
 
 	ttl := h.TTL()
-	if ttl == 0 {
+	if ttl <= 1 {
 		// As per RFC 792 page 6, Time Exceeded Message,
 		//
 		//  If the gateway processing a datagram finds the time to live field

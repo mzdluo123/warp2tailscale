@@ -442,11 +442,11 @@ func rewritePacket(n header.Network, t header.Transport, updateSRCFields, fullCh
 		}
 	case header.ICMPv4:
 		switch icmpType := t.Type(); icmpType {
-		case header.ICMPv4Echo:
+		case header.ICMPv4Echo, header.ICMPv4Timestamp, header.ICMPv4InfoRequest, header.ICMPv4AddressMaskRequest:
 			if updateSRCFields {
 				t.SetIdentWithChecksumUpdate(newPortOrIdent)
 			}
-		case header.ICMPv4EchoReply:
+		case header.ICMPv4EchoReply, header.ICMPv4TimestampReply, header.ICMPv4InfoReply, header.ICMPv4AddressMaskReply:
 			if !updateSRCFields {
 				t.SetIdentWithChecksumUpdate(newPortOrIdent)
 			}

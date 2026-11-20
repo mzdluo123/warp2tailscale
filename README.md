@@ -3,7 +3,8 @@
 把 Cloudflare WARP 作为 Tailscale 出口。节点在一个 Go 进程中运行 tsnet、两个 gVisor 网络栈和 usque 的 MASQUE 隧道。客户端选中出口节点后，普通应用即可按系统路由访问公网。
 
 ```text
-Tailscale 客户端 ⇄ WireGuard ⇄ tsnet / gVisor TCP ⇄ Go 中继 ⇄ WARP 内存网络栈 ⇄ MASQUE ⇄ 公网
+Tailscale 客户端 ⇄ WireGuard ⇄ tsnet ┬─ TCP 中继 ───┬─ WARP 内存网络栈 ⇄ MASQUE ⇄ 公网
+                                     └─ UDP/ICMP NAT ┘
 ```
 
 ## 协议支持
@@ -11,9 +12,11 @@ Tailscale 客户端 ⇄ WireGuard ⇄ tsnet / gVisor TCP ⇄ Go 中继 ⇄ WARP 
 | 流量 | 行为 |
 |---|---|
 | 公网 IPv4 / IPv6 TCP | 经 WARP 转发。节点向客户端发送的内层 TCP 支持 BBRv1、CUBIC 和 Reno。 |
-| 公网 UDP/53 | 保留数据报边界，转发到客户端指定的公网 DNS 服务器。 |
+| 公网 IPv4 / IPv6 UDP | `policy.udp: all` 通过 WARP 内存栈做源地址转换，支持任意目的端口，包括 DNS、QUIC 和 HTTP/3。设为 `dns-only` 可限制为 UDP/53。 |
 | Tailscale 出口 DNS | PeerAPI 检查客户端权限和查询名，然后通过 WARP 向 `1.1.1.1:53` 发送 DNS-over-TCP 查询。 |
-| 其他公网 UDP、ICMP | 丢弃。仅支持 QUIC 的应用及公网 ping 无法使用。 |
+| 公网 IPv4 / IPv6 ICMP | `policy.icmp: true` 开启公网 echo 及流关联的 ICMP 错误，包括超时、不可达和 MTU 通知。由内存路由器处理 TTL、校验和与错误内嵌的原始报文。 |
+
+示例配置开启双栈 UDP 和 ICMP。UDP 路由与 TCP 中继共用当前 WARP 会话。公网测试中，HTTP/3、双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显在同一真实路径上双栈均超时；节点已观察到 IP 重组并向 WARP 发送分片，公网接收端抓包未看到分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。IPv6 邻居发现等链路本地控制报文只在所属链路内生效。
 
 WARP 会话断开时，节点关闭该会话中的连接，并拒绝新的出口连接，直到隧道恢复。Tailnet 和 WARP 的外层连接使用宿主机网络。
 
@@ -50,6 +53,8 @@ curl --noproxy '*' -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip
 dig @100.100.100.100 example.com AAAA
 ```
 
+`tailscale.port` 可设置 Tailscale UDP 首选监听端口；0 自动选择。Tailnet 若启用了客户端端口随机化，以节点实际通告的端点为准。
+
 常驻部署可使用仓库中的 systemd 单元。它以 `warp2tailscale` 用户运行，从 `/opt/warp2tailscale/exitnode` 启动，读取 `/etc/warp2tailscale/config.yaml`。配置内的相对路径以工作目录 `/var/lib/warp2tailscale` 为基准。首次注册与后续服务应使用同一个状态目录和服务用户。[systemd 单元](deploy/warp2tailscale.service)
 
 ## TCP 调优
@@ -60,14 +65,27 @@ dig @100.100.100.100 example.com AAAA
 |---|---|---|
 | `congestion.type` | `bbr`、`cubic`、`reno` | `bbr` |
 | `congestion.initial_cwnd_packets` | 4–128 个 MSS，0 使用默认值 | 32 |
-| `congestion.pacing_burst_packets` | 1–16 个 MSS，0 使用默认值 | 1 |
-| `tcp.send_buffer_bytes` | 4096–67108864 字节，0 使用栈默认值 | 0 |
-| `tcp.receive_buffer_bytes` | 同上 | 0 |
+| `congestion.pacing_burst_packets` | 每次发包最多 1–32 个 MSS，0 使用栈默认值 1 | 32 |
+| `congestion.pacing_burst_window` | 0–10 ms，以当前速率限制每一批可提前发送的数据量，0 仅使用包数限制 | 2ms |
+| `congestion.max_pacing_bytes_per_second` | 每条客户端方向 TCP 的 pacing 速率上限，0 由 BBR 估算 | 12000000 |
+| `warp.packet_queue_packets` | WARP 出口队列容量，1–256 包，0 使用默认值 32 | 32 |
+| `runtime.max_procs` | Go 同时执行的逻辑处理器数，0 使用运行时默认值 | 2 |
+| `tcp.send_buffer_bytes` | 4096–67108864 字节，0 使用栈默认值 | 8388608（8 MiB） |
+| `tcp.receive_buffer_bytes` | 同上 | 4194304（4 MiB） |
 
-一次约 190 ms RTT 的跨机实测中，初始窗口固定为 32 MSS，将 pacing burst 从 1 调到 16 MSS，同一 8 MiB 公网下载由 0.62 MB/s 增至 3.31 MB/s。该路径上，发送/接收缓冲区从 4/2 MiB 调到 8/4 MiB 的收益小于样本间波动。
+同一台出口节点、同一个双栈客户端和同一公网 CDN，使用无代理 HTTPS 分段下载，每组 5 次、每次 15 MiB。下载时每 200 ms 向出口节点的 Tailscale 地址发一个 ping。下表给出各轮吞吐、RTT 和出口服务每传输 1 MiB 消耗的 CPU 时间的中位数。
+
+| BBR 突发 / 时间上限 / 单流速率上限 / Go 并行度 | 吞吐 MB/s | 空闲 RTT P50 | 下载时 RTT P95 | CPU ms/MiB |
+|---|---:|---:|---:|---:|
+| 16 MSS / 关闭 / 自动 / 自动 | 5.96 | 184 ms | 186 ms | 56.78 |
+| 16 MSS / 关闭 / 自动 / 自动（另一时段） | 3.06 | 203 ms | 237 ms | 114.10 |
+| 32 MSS / 2 ms / 12 MB/s / 2 | 4.97 | 175 ms | 178 ms | 65.62 |
+| 16 MSS / 2 ms / 24 MB/s / 自动 | 4.90 | 217 ms | 228 ms | 71.00 |
+
+示例选择 32 MSS、2 ms 的时间限制、每秒 1200 万字节的单流速率上限和 32 包的 WARP 队列。该配置用于限制突发发送和排队。表内各轮在下载开始、结束时均确认 Tailscale 直连。不同轮次可能走不同的 IPv4 或 IPv6 公网端点，空闲 RTT 也随之变化。CPU 统计包含服务同时处理的其他流量，表中差异不能全归因于配置。另一次非稳定路径测试中，下载期间的 RTT P95 达到 1001 ms。最后部署的配置也遇到过持续 120 秒的下载超时，当次只收到约 4 MB，采到的 250 个 ping 中丢失 46.4%。这些测试没有注入丢包。
 
 ## 验证
 
-`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要 curl、dig 和 Python 3。它会验证默认解析、IPv4/IPv6 HTTPS 和显式 UDP/53。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
+`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
 
 本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE) 和 [usque](third_party/usque/LICENSE.md)。

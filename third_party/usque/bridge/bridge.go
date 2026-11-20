@@ -18,23 +18,29 @@ import (
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/internal"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
 )
 
 var ErrWarpDown = errors.New("WARP tunnel unavailable")
 
 type Backend interface {
+	ForwardPacket(src, dst netip.Addr, packet []byte, fragmented bool) bool
+	JoinClientFragments([]byte) []byte
 	Ready() bool
 	DialTCP(context.Context, netip.AddrPort) (net.Conn, error)
 	DialUDP(netip.AddrPort) (net.Conn, error)
 	Close() error
 }
 type generation struct {
-	network   *netstack.Net
-	ctx       context.Context
-	cancel    context.CancelFunc
-	interrupt func()
-	dials     sync.WaitGroup
-	flows     map[*flow]struct{}
+	clientFragments *ipfragment.Reassembler
+	firstClientJoin sync.Once
+	router          *netstack.Forwarder
+	network         *netstack.Net
+	ctx             context.Context
+	cancel          context.CancelFunc
+	interrupt       func()
+	dials           sync.WaitGroup
+	flows           map[*flow]struct{}
 }
 type backend struct {
 	mu      sync.Mutex
@@ -79,6 +85,17 @@ func New(parent context.Context, path string) (Backend, error) {
 	return NewWithBuffers(parent, path, 0, 0)
 }
 func NewWithBuffers(parent context.Context, path string, send, receive int) (Backend, error) {
+	return NewRouted(parent, path, send, receive, 0, nil, nil)
+}
+
+// NewRouted enables generation-scoped IP forwarding when a return path is supplied.
+func NewRouted(parent context.Context, path string, send, receive, queue int, clientRoutes func(context.Context) ([]netip.Prefix, error), deliver func([]byte) error) (Backend, error) {
+	if queue == 0 {
+		queue = 32
+	}
+	if queue < 1 || queue > 256 {
+		return nil, errors.New("invalid WARP packet queue")
+	}
 	for _, size := range []int{send, receive} {
 		if size != 0 && (size < 4096 || size > 64<<20) {
 			return nil, errors.New("invalid WARP TCP buffer size")
@@ -141,7 +158,7 @@ func NewWithBuffers(parent context.Context, path string, send, receive int) (Bac
 			AlwaysReconnect: true,
 			ReconnectDelay:  time.Second,
 			OpenDevice: func() (api.TunnelDevice, func(), error) {
-				dev, n, err := netstack.CreateNetTUN([]netip.Addr{v4, v6}, nil, 1280)
+				dev, n, err := netstack.CreateNetTUNWithQueue([]netip.Addr{v4, v6}, nil, 1280, queue)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -151,7 +168,27 @@ func NewWithBuffers(parent context.Context, path string, send, receive int) (Bac
 				}
 				gctx, gcancel := context.WithCancel(ctx)
 				pending = &generation{network: n, ctx: gctx, cancel: gcancel, interrupt: dev.(interface{ InterruptPackets() }).InterruptPackets, flows: make(map[*flow]struct{})}
-				return api.NewNetstackAdapter(dev), func() { dev.Close() }, nil
+				adapter := api.NewNetstackAdapter(dev)
+				if deliver != nil {
+					clients, err := clientRoutes(gctx)
+					if err != nil {
+						gcancel()
+						dev.Close()
+						return nil, nil, err
+					}
+					router, err := n.EnableForwarding(gctx, clients, deliver)
+					if err != nil {
+						gcancel()
+						dev.Close()
+						return nil, nil, err
+					}
+					pending.router = router
+					wan, client := ipfragment.New(), ipfragment.New()
+					pending.clientFragments = client
+					adapter = &routedDevice{TunnelDevice: adapter, local: b.local, network: n, wan: wan}
+					return adapter, func() { wan.Close(); client.Close(); dev.Close() }, nil
+				}
+				return adapter, func() { dev.Close() }, nil
 			}, OnStateChange: func(up bool) {
 				if up {
 					b.mu.Lock()

@@ -19,7 +19,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -41,16 +40,14 @@ import (
 )
 
 type netTun struct {
-	ep             *channel.Endpoint
-	stack          *stack.Stack
-	events         chan tun.Event
-	notifyHandle   *channel.NotificationHandle
-	done           chan struct{}
-	interruptOnce  sync.Once
-	incomingPacket chan *buffer.View
-	mtu            int
-	dnsServers     []netip.Addr
-	hasV4, hasV6   bool
+	ep           *channel.Endpoint
+	stack        *stack.Stack
+	events       chan tun.Event
+	readContext  context.Context
+	stopRead     context.CancelFunc
+	mtu          int
+	dnsServers   []netip.Addr
+	hasV4, hasV6 bool
 }
 
 type Net netTun
@@ -60,26 +57,32 @@ func (n *Net) SetTCPBufferSizes(send, receive int) error {
 }
 
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
+	return CreateNetTUNWithQueue(localAddresses, dnsServers, mtu, 32)
+}
+
+func CreateNetTUNWithQueue(localAddresses, dnsServers []netip.Addr, mtu, queue int) (tun.Device, *Net, error) {
+	if queue < 1 || queue > 256 {
+		return nil, nil, fmt.Errorf("packet queue must be 1..256")
+	}
 	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
 		HandleLocal:        true,
 	}
+	readContext, stopRead := context.WithCancel(context.Background())
 	dev := &netTun{
-		ep:             channel.New(1024, uint32(mtu), ""),
-		stack:          stack.New(opts),
-		events:         make(chan tun.Event, 10),
-		done:           make(chan struct{}),
-		incomingPacket: make(chan *buffer.View),
-		dnsServers:     dnsServers,
-		mtu:            mtu,
+		ep:          channel.New(queue, uint32(mtu), ""),
+		stack:       stack.New(opts),
+		events:      make(chan tun.Event, 10),
+		readContext: readContext, stopRead: stopRead,
+		dnsServers: dnsServers,
+		mtu:        mtu,
 	}
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
-	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
@@ -129,19 +132,40 @@ func (tun *netTun) Events() <-chan tun.Event {
 }
 
 func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	var view *buffer.View
-	select {
-	case <-tun.done:
-		return 0, os.ErrClosed
-	case view = <-tun.incomingPacket:
-	}
-	defer view.Release()
-	n, err := view.Read(buf[0][offset:])
+	n, err := tun.readPacket(buf[0][offset:], false)
 	if err != nil {
 		return 0, err
 	}
 	sizes[0] = n
 	return 1, nil
+}
+
+// ReadConnectIP returns an inner packet for a CONNECT-IP writer, which accounts
+// for the router hop itself. Locally originated packets keep their initial TTL.
+func (tun *netTun) ReadConnectIP(dst []byte) (int, error) { return tun.readPacket(dst, true) }
+
+func (tun *netTun) readPacket(dst []byte, connectIP bool) (int, error) {
+	pkt := tun.ep.ReadContext(tun.readContext)
+	if pkt == nil {
+		return 0, os.ErrClosed
+	}
+	defer pkt.DecRef()
+	if connectIP && len(dst) < pkt.Size() {
+		return 0, io.ErrShortBuffer
+	}
+	n := copyPacket(dst, pkt)
+	if connectIP && pkt.NetworkPacketInfo.IsForwardedPacket {
+		if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber && n >= header.IPv4MinimumSize {
+			h := header.IPv4(dst[:n])
+			h.SetTTL(h.TTL() + 1)
+			h.SetChecksum(0)
+			h.SetChecksum(^h.CalculateChecksum())
+		} else if pkt.NetworkProtocolNumber == header.IPv6ProtocolNumber && n >= header.IPv6MinimumSize {
+			h := header.IPv6(dst[:n])
+			h.SetHopLimit(h.HopLimit() + 1)
+		}
+	}
+	return n, nil
 }
 
 func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
@@ -166,28 +190,11 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 	return len(buf), nil
 }
 
-func (tun *netTun) WriteNotify() {
-	pkt := tun.ep.Read()
-	if pkt == nil {
-		return
-	}
-
-	view := pkt.ToView()
-	pkt.DecRef()
-
-	select {
-	case tun.incomingPacket <- view:
-	case <-tun.done:
-		view.Release()
-	}
-}
-
-func (tun *netTun) InterruptPackets() { tun.interruptOnce.Do(func() { close(tun.done) }) }
+func (tun *netTun) InterruptPackets() { tun.stopRead() }
 func (tun *netTun) Close() error {
 	tun.InterruptPackets()
 	tun.stack.RemoveNIC(1)
 	tun.stack.Close()
-	tun.ep.RemoveNotify(tun.notifyHandle)
 	tun.ep.Close()
 
 	if tun.events != nil {

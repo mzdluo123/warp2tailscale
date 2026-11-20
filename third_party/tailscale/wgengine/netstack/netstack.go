@@ -159,6 +159,7 @@ func init() {
 // stack when Tailscale is running in fake mode.
 type Impl struct {
 	restrictedExit bool
+	ExitPacket     func(*packet.Parsed) bool
 	// GetTCPHandlerForFlow conditionally handles an incoming TCP flow for the
 	// provided (src/port, dst/port) 4-tuple.
 	//
@@ -1210,8 +1211,8 @@ func (ns *Impl) peerAPIPortAtomic(ip netip.Addr) *atomic.Uint32 {
 var viaRange = tsaddr.TailscaleViaRange()
 
 // ConfigureExit selects the client-facing stack's TCP algorithm before Start.
-func (ns *Impl) ConfigureExit(cc string, send, receive, iw, burst int) error {
-	if err := tcp.ConfigureBBR(ns.ipstack, tcp.BBRSettings{InitialCwnd: iw, PacingBurst: burst}); err != nil {
+func (ns *Impl) ConfigureExit(cc string, send, receive, iw, burst int, window time.Duration, rateLimit int64) error {
+	if err := tcp.ConfigureBBR(ns.ipstack, tcp.BBRSettings{InitialCwnd: iw, PacingBurst: burst, BurstWindow: window, RateLimit: rateLimit}); err != nil {
 		return err
 	}
 	if err := tcp.SetBufferSizes(ns.ipstack, send, receive); err != nil {
@@ -1433,6 +1434,9 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper, gro *gro.GRO) 
 	}
 
 	if ns.restrictedExit && !ns.isLocalIP(p.Dst.Addr()) {
+		if ns.ExitPacket != nil && !viaRange.Contains(p.Dst.Addr()) && tsaddr.IsTailscaleIP(p.Src.Addr()) && ns.ExitPacket(p) {
+			return filter.DropSilently, gro
+		}
 		if p.IPProto != ipproto.TCP && p.IPProto != ipproto.UDP || viaRange.Contains(p.Dst.Addr()) {
 			return filter.DropSilently, gro
 		}

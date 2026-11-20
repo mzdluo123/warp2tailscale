@@ -13,7 +13,11 @@ import (
 )
 
 // BBRSettings controls the initial window and maximum pacing quantum in MSS.
-type BBRSettings struct{ InitialCwnd, PacingBurst int }
+type BBRSettings struct {
+	InitialCwnd, PacingBurst int
+	BurstWindow              time.Duration
+	RateLimit                int64
+}
 
 // ConfigureBBR sets defaults for future senders on this stack only.
 func ConfigureBBR(st *stack.Stack, cfg BBRSettings) error {
@@ -23,7 +27,7 @@ func ConfigureBBR(st *stack.Stack, cfg BBRSettings) error {
 	if cfg.PacingBurst == 0 {
 		cfg.PacingBurst = 1
 	}
-	if cfg.InitialCwnd < 4 || cfg.InitialCwnd > 128 || cfg.PacingBurst < 1 || cfg.PacingBurst > 16 {
+	if cfg.InitialCwnd < 4 || cfg.InitialCwnd > 128 || cfg.PacingBurst < 1 || cfg.PacingBurst > 32 || cfg.BurstWindow < 0 || cfg.BurstWindow > 10*time.Millisecond || cfg.RateLimit < 0 {
 		return fmt.Errorf("invalid BBR initial cwnd %d or pacing burst %d", cfg.InitialCwnd, cfg.PacingBurst)
 	}
 	p := protocolFromStack(st)
@@ -31,6 +35,13 @@ func ConfigureBBR(st *stack.Stack, cfg BBRSettings) error {
 	p.bbrSettings = cfg
 	p.mu.Unlock()
 	return nil
+}
+
+func (cfg BBRSettings) limitRate(rate float64) float64 {
+	if cfg.RateLimit > 0 {
+		return min(rate, float64(cfg.RateLimit))
+	}
+	return rate
 }
 
 type deliverySnapshot struct {
@@ -69,7 +80,7 @@ func newBBR(s *sender) *bbrController {
 		p.mu.RUnlock()
 	}
 	s.SndCwnd = cfg.InitialCwnd
-	return &bbrController{settings: cfg, s: s, mode: "STARTUP", minStamp: now, nextRound: s.SndNxt, lastACK: now, firstSent: now, rate: 2.885 * float64(cfg.InitialCwnd*s.MaxPayloadSize) / .1}
+	return &bbrController{settings: cfg, s: s, mode: "STARTUP", minStamp: now, nextRound: s.SndNxt, lastACK: now, firstSent: now, rate: cfg.limitRate(2.885 * float64(cfg.InitialCwnd*s.MaxPayloadSize) / .1)}
 }
 func (b *bbrController) HandleLossDetected()       { b.s.Ssthresh = max(4, b.s.SndCwnd) }
 func (b *bbrController) HandleRTOExpired()         { b.HandleLossDetected() }
@@ -84,7 +95,15 @@ func (b *bbrController) ack(n int, rtt time.Duration, snap *deliverySnapshot) {
 	if newRound {
 		b.nextRound = b.s.SndNxt
 		b.round++
-		b.peak[b.round%len(b.peak)] = 0
+		slot := b.round % len(b.peak)
+		expiredPeak := b.peak[slot]
+		b.peak[slot] = 0
+		if expiredPeak == b.bw {
+			b.bw = 0
+			for _, rate := range b.peak {
+				b.bw = max(b.bw, rate)
+			}
+		}
 	}
 	if snap != nil {
 		b.firstSent = snap.sent
@@ -93,11 +112,8 @@ func (b *bbrController) ack(n int, rtt time.Duration, snap *deliverySnapshot) {
 			sample := float64(b.delivered-snap.bytes) / interval.Seconds()
 			slot := b.round % len(b.peak)
 			b.peak[slot] = max(b.peak[slot], sample)
+			b.bw = max(b.bw, sample)
 		}
-	}
-	b.bw = 0
-	for _, rate := range b.peak {
-		b.bw = max(b.bw, rate)
 	}
 	b.lastACK = now
 	expired := now.Sub(b.minStamp) >= 10*time.Second
@@ -109,7 +125,7 @@ func (b *bbrController) ack(n int, rtt time.Duration, snap *deliverySnapshot) {
 		return
 	}
 	mss := b.s.MaxPayloadSize
-	bdp := b.bw * b.minRTT.Seconds() / float64(mss)
+	bdp := b.settings.limitRate(b.bw) * b.minRTT.Seconds() / float64(mss)
 	if expired && b.mode != "PROBE_RTT" {
 		b.mode = "PROBE_RTT"
 		b.probeUntil = tcpip.MonotonicTime{}
@@ -164,7 +180,7 @@ func (b *bbrController) ack(n int, rtt time.Duration, snap *deliverySnapshot) {
 	if b.mode == "STARTUP" {
 		rate = max(rate, b.rate)
 	}
-	b.rate = rate
+	b.rate = b.settings.limitRate(rate)
 	if previous != b.mode || b.acks == 1 || now.Sub(b.lastLog) >= time.Second {
 		log.Printf("flow=%v cc=bbr initial_cwnd=%d burst_mss=%d mode=%s min_rtt=%s btlbw_Bps=%.0f pacing_rate_Bps=%.0f cwnd=%d bytes_in_flight=%d acks=%d retransmits=%d paced_waits=%d last_send_gap=%s", b.s.ep.TransportEndpointInfo.ID, b.settings.InitialCwnd, b.settings.PacingBurst, b.mode, b.minRTT, b.bw, b.rate, b.s.SndCwnd, b.s.SndUna.Size(b.s.SndNxt), b.acks, b.retransmits, b.waits, b.gap)
 		b.lastLog = now

@@ -1,0 +1,22 @@
+[Unit]
+Description=Tailscale exit node with in-process WARP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warp2tailscale
+Group=warp2tailscale
+WorkingDirectory=/var/lib/warp2tailscale
+ExecStart=/opt/warp2tailscale/exitnode -config /etc/warp2tailscale/config.yaml
+Restart=on-failure
+RestartSec=3
+StateDirectory=warp2tailscale
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+
+[Install]
+WantedBy=multi-user.target

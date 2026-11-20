@@ -1,0 +1,23 @@
+tailscale:
+  hostname: warp-bbr-exit-mvp
+  state_dir: ./state/tsnet
+warp:
+  config_path: ./state/warp/config.json
+  transport: masque-h3
+  mtu: 1280
+  reconnect_delay: 1s
+  fail_closed: true
+congestion:
+  type: bbr  # bbr / cubic / reno
+  bbrProfile: standard
+  initial_cwnd_packets: 32
+  pacing_burst_packets: 1
+tcp:
+  # Per TCP endpoint, in bytes, on both the Tailscale and WARP stacks.
+  # 0 keeps native defaults; explicit sizes range from 4096 to 67108864.
+  send_buffer_bytes: 0
+  receive_buffer_bytes: 0
+policy:
+  udp: dns-only
+  ipv4: true
+  ipv6: true

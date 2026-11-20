@@ -1,0 +1,10 @@
+/state/
+/bin/
+/evidence/
+/key.txt
+/config.yaml
+/config.json
+/.env
+/RESULTS.md
+/tailscale_warp_gvisor_bbr_mvp (1).md
+*:Zone.Identifier

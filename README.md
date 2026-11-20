@@ -88,6 +88,14 @@ dig @100.100.100.100 example.com AAAA
 
 ## 验证
 
+可用下列命令测量 TCP 校验和验证、接收缓冲区复制和应用读取这段路径的耗时与堆分配。
+
+```sh
+go test tailscale.com/wgengine/netstack/gro -run '^$' -bench '^BenchmarkTCPReceive$' -benchmem -cpu 1 -count 3
+```
+
+在同一台 Linux 出口服务器上交替运行优化前后的版本，1200 字节 TCP 载荷的中位耗时从 438 ns 降到 170 ns，每包堆分配从 1 次降到 0 次。评估实际出口服务时，还需同时记录完整下载期间的服务 CPU 时间、下载字节数和负载下的 RTT。
+
 `bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
 
 本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE) 和 [usque](third_party/usque/LICENSE.md)。

@@ -241,14 +241,14 @@ func (c *linuxBatchingConn) getSendBatch() *sendBatch {
 	return batch
 }
 
-func (c *linuxBatchingConn) putSendBatch(batch *sendBatch) {
-	for i := range batch.msgs {
-		// Non coalesced write paths access only batch.msgs[i].Buffers[0],
-		// but we append more during [linuxBatchingConn.coalesceMessages].
-		// Leave index zero accessible:
-		batch.msgs[i] = ipv6.Message{Buffers: batch.msgs[i].Buffers[:1], OOB: batch.msgs[i].OOB}
+// reset releases packet references in the messages submitted to sendmmsg.
+// A GSO batch can use just one message with several scatter/gather buffers.
+func (batch *sendBatch) reset(used int) {
+	for i := range batch.msgs[:used] {
+		m := &batch.msgs[i]
+		clear(m.Buffers)
+		*m = ipv6.Message{Buffers: m.Buffers[:1], OOB: m.OOB[:0]}
 	}
-	c.sendBatchPool.Put(batch)
 }
 
 // appendSentinelTailBatchSizeThreshold represents the minimum batch size
@@ -274,7 +274,7 @@ const appendSentinelTailBatchSizeThreshold = 8
 
 func (c *linuxBatchingConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, geneve packet.GeneveHeader, offset int) error {
 	batch := c.getSendBatch()
-	defer c.putSendBatch(batch)
+	defer c.sendBatchPool.Put(batch)
 	if addr.Addr().Is6() {
 		as16 := addr.Addr().As16()
 		copy(batch.ua.IP, as16[:])
@@ -306,10 +306,6 @@ retry:
 				geneve.Encode(buffs[i])
 			}
 			batch.msgs[i].Buffers[0] = buffs[i][mutableOffset:]
-			// Buffers length may be > 1 (scatter-gather) if we passed through
-			// coalesceMessages during a first pass, and landed here as part of
-			// goto retry.
-			batch.msgs[i].Buffers = batch.msgs[i].Buffers[:1]
 			batch.msgs[i].Addr = batch.ua
 			batch.msgs[i].OOB = batch.msgs[i].OOB[:0]
 		}
@@ -317,6 +313,7 @@ retry:
 	}
 
 	err := c.writeBatch(batch.msgs[:n])
+	batch.reset(n)
 	if err != nil && c.txOffload.Load() && neterror.ShouldDisableUDPGSO(err) {
 		c.txOffload.Store(false)
 		retried = true

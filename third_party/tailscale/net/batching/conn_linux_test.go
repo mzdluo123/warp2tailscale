@@ -772,3 +772,24 @@ func Test_linuxBatchingConn_handleRXQOverflowCounter(t *testing.T) {
 	}}, 1, nil)
 	c.Assert(conn.rxqOverflowsMetric.Value(), qt.Equals, int64(1+math.MaxUint32))
 }
+
+func TestSendBatchReset(t *testing.T) {
+	buffers := [][]byte{{1}, {2}, {3}}
+	batch := sendBatch{msgs: []ipv6.Message{
+		{Buffers: buffers, OOB: make([]byte, 4), Addr: &net.UDPAddr{}, N: 3},
+		{Buffers: make([][]byte, 1), OOB: make([]byte, 8)},
+	}}
+	batch.reset(1)
+	m := batch.msgs[0]
+	if len(m.Buffers) != 1 || cap(m.Buffers) != len(buffers) || len(m.OOB) != 0 || cap(m.OOB) != 4 || m.Addr != nil || m.N != 0 {
+		t.Fatalf("used message not reset for reuse: %+v", m)
+	}
+	for _, buf := range buffers {
+		if buf != nil {
+			t.Fatal("retained a packet from the coalesced write")
+		}
+	}
+	if len(batch.msgs[1].OOB) != 8 {
+		t.Fatal("reset touched a message outside the submitted batch")
+	}
+}

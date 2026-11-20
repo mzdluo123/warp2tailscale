@@ -5,6 +5,8 @@ package gro
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"net/netip"
 	"testing"
 
@@ -25,20 +27,7 @@ func Test_RXChecksumOffload(t *testing.T) {
 		Flags:      header.TCPFlagAck | header.TCPFlagPsh,
 		WindowSize: 3000,
 	}
-	tcp4 := make([]byte, 20+20+payloadLen)
-	ipv4H := header.IPv4(tcp4)
-	ipv4H.Encode(&header.IPv4Fields{
-		SrcAddr:     tcpip.AddrFromSlice(netip.MustParseAddr("192.0.2.1").AsSlice()),
-		DstAddr:     tcpip.AddrFromSlice(netip.MustParseAddr("192.0.2.2").AsSlice()),
-		Protocol:    uint8(header.TCPProtocolNumber),
-		TTL:         64,
-		TotalLength: uint16(len(tcp4)),
-	})
-	ipv4H.SetChecksum(^ipv4H.CalculateChecksum())
-	tcpH := header.TCP(tcp4[20:])
-	tcpH.Encode(tcpFields)
-	pseudoCsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipv4H.SourceAddress(), ipv4H.DestinationAddress(), uint16(20+payloadLen))
-	tcpH.SetChecksum(^tcpH.CalculateChecksum(pseudoCsum))
+	tcp4 := makeTCP4(tcpFields, payloadLen)
 
 	tcp6ExtHeader := make([]byte, 40+8+20+payloadLen)
 	ipv6H := header.IPv6(tcp6ExtHeader)
@@ -52,9 +41,9 @@ func Test_RXChecksumOffload(t *testing.T) {
 	tcp6ExtHeader[40] = uint8(header.TCPProtocolNumber) // next header
 	tcp6ExtHeader[41] = 0                               // length of ext header in 8-octet units, exclusive of first 8 octets.
 	// 42-47 options and padding
-	tcpH = header.TCP(tcp6ExtHeader[48:])
+	tcpH := header.TCP(tcp6ExtHeader[48:])
 	tcpH.Encode(tcpFields)
-	pseudoCsum = header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipv6H.SourceAddress(), ipv6H.DestinationAddress(), uint16(20+payloadLen))
+	pseudoCsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipv6H.SourceAddress(), ipv6H.DestinationAddress(), uint16(20+payloadLen))
 	tcpH.SetChecksum(^tcpH.CalculateChecksum(pseudoCsum))
 
 	tcp4InvalidCsum := make([]byte, len(tcp4))
@@ -102,9 +91,55 @@ func Test_RXChecksumOffload(t *testing.T) {
 				t.Fatalf("wantPB = %v != (got != nil): %v", tt.wantPB, got != nil)
 			}
 			if tt.wantPB {
+				defer got.DecRef()
+				want := bytes.Clone(tt.input)
+				clear(tt.input) // WireGuard can immediately reuse its receive buffer.
 				gotBuf := got.ToBuffer()
-				if !bytes.Equal(tt.input, gotBuf.Flatten()) {
+				defer gotBuf.Release()
+				if !bytes.Equal(want, gotBuf.Flatten()) {
 					t.Fatal("output packet unequal to input")
+				}
+			}
+		})
+	}
+}
+
+func makeTCP4(tcpFields *header.TCPFields, payloadLen int) []byte {
+	tcp4 := make([]byte, 20+20+payloadLen)
+	ipv4H := header.IPv4(tcp4)
+	ipv4H.Encode(&header.IPv4Fields{
+		SrcAddr:     tcpip.AddrFromSlice(netip.MustParseAddr("192.0.2.1").AsSlice()),
+		DstAddr:     tcpip.AddrFromSlice(netip.MustParseAddr("192.0.2.2").AsSlice()),
+		Protocol:    uint8(header.TCPProtocolNumber),
+		TTL:         64,
+		TotalLength: uint16(len(tcp4)),
+	})
+	ipv4H.SetChecksum(^ipv4H.CalculateChecksum())
+	tcpH := header.TCP(tcp4[20:])
+	tcpH.Encode(tcpFields)
+	pseudoCsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipv4H.SourceAddress(), ipv4H.DestinationAddress(), uint16(20+payloadLen))
+	tcpH.SetChecksum(^tcpH.CalculateChecksum(pseudoCsum))
+	return tcp4
+}
+
+func BenchmarkTCPReceive(b *testing.B) {
+	for _, payload := range []int{0, 1200} {
+		b.Run(fmt.Sprintf("payload%d", payload), func(b *testing.B) {
+			raw := makeTCP4(&header.TCPFields{DataOffset: 20, Flags: header.TCPFlagAck}, payload)
+			var frame packet.Parsed
+			frame.Decode(raw)
+			b.ReportAllocs()
+			for b.Loop() {
+				pkt := RXChecksumOffload(&frame)
+				if pkt == nil {
+					b.Fatal("packet rejected")
+				}
+				pkt.NetworkHeader().Consume(20)
+				pkt.TransportHeader().Consume(20)
+				n, err := pkt.Data().ReadTo(io.Discard, false)
+				pkt.DecRef()
+				if n != payload || err != nil {
+					b.Fatalf("received %d bytes, err=%v", n, err)
 				}
 			}
 		})

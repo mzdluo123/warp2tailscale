@@ -7,8 +7,6 @@
 package gro
 
 import (
-	"bytes"
-
 	"github.com/tailscale/wireguard-go/tun"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -63,7 +61,7 @@ func RXChecksumOffload(p *packet.Parsed) *stack.PacketBuffer {
 			// re-used. parse.IPv6() "consumes" the IPv6 headers, so we can't
 			// inject this stack.PacketBuffer into the stack at a later point.
 			packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(bytes.Clone(buf)),
+				Payload: buffer.MakeWithData(buf),
 			})
 			defer packetBuf.DecRef()
 			// The rightmost bool returns false only if packetBuf is too short,
@@ -93,8 +91,9 @@ func RXChecksumOffload(p *packet.Parsed) *stack.PacketBuffer {
 		}
 	}
 
+	// MakeWithData copies the reusable WireGuard receive buffer into stack-owned storage.
 	packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(bytes.Clone(buf)),
+		Payload: buffer.MakeWithData(buf),
 	})
 	packetBuf.NetworkProtocolNumber = pn
 	// Setting this is not technically required. gVisor overrides where

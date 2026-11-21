@@ -1,14 +1,22 @@
 package exit
 
 import (
+	"context"
 	"net"
 	"sync"
 	"time"
 )
 
-// DNS forwards a complete datagram per write. Traffic in either direction
+// RelayDatagrams forwards a complete datagram per write. Traffic in either direction
 // extends the shared idle timeout.
-func DNS(a, b net.Conn) (int64, int64) {
+func RelayDatagrams(ctx context.Context, a, b net.Conn) (int64, int64) {
+	closeBoth := func() {
+		a.Close()
+		b.Close()
+	}
+	stop := context.AfterFunc(ctx, closeBoth)
+	defer stop()
+
 	var mu sync.Mutex
 	touch := func() {
 		mu.Lock()
@@ -33,8 +41,7 @@ func DNS(a, b net.Conn) (int64, int64) {
 				break
 			}
 		}
-		a.Close()
-		b.Close()
+		closeBoth()
 		ch <- total
 	}
 	up, down := make(chan int64, 1), make(chan int64, 1)

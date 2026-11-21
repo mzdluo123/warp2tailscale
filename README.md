@@ -1,28 +1,29 @@
 # warp2tailscale
 
-把 Cloudflare WARP 作为 Tailscale 出口。节点在一个 Go 进程中运行 tsnet、两个 gVisor 网络栈和 usque 的 MASQUE 隧道。客户端选中出口节点后，普通应用即可按系统路由访问公网。
+将一台 Linux 主机作为 Tailscale 出口。默认通过 Cloudflare WARP（MASQUE）访问公网，也可通过宿主机网络直接出站。客户端选中出口节点后，普通应用即可按系统路由访问公网。两种模式都在节点内的 gVisor 用户态网络栈接管客户端侧 TCP。
 
 ```text
 Tailscale 客户端 ⇄ WireGuard ⇄ tsnet ┬─ TCP 中继 ───┬─ WARP 内存网络栈 ⇄ MASQUE ⇄ 公网
                                      └─ UDP/ICMP NAT ┘
+Tailscale 客户端 ⇄ WireGuard ⇄ tsnet ── TCP/UDP 中继 ── 宿主机套接字 ⇄ 公网（direct）
 ```
 
 ## 协议支持
 
-| 流量 | 行为 |
-|---|---|
-| 公网 IPv4 / IPv6 TCP | 经 WARP 转发。节点向客户端发送的内层 TCP 支持 BBRv1、CUBIC 和 Reno。 |
-| 公网 IPv4 / IPv6 UDP | `policy.udp: all` 通过 WARP 内存栈做源地址转换，支持任意目的端口，包括 DNS、QUIC 和 HTTP/3。设为 `dns-only` 可限制为 UDP/53。 |
-| Tailscale 出口 DNS | PeerAPI 检查客户端权限和查询名，然后通过 WARP 向 `1.1.1.1:53` 发送 DNS-over-TCP 查询。 |
-| 公网 IPv4 / IPv6 ICMP | `policy.icmp: true` 开启公网 echo 及流关联的 ICMP 错误，包括超时、不可达和 MTU 通知。由内存路由器处理 TTL、校验和与错误内嵌的原始报文。 |
+| 流量 | `warp`（默认） | `direct` |
+|---|---|---|
+| 公网 IPv4 / IPv6 TCP | 通过 WARP gVisor 栈连接公网。 | 通过宿主机 TCP socket 连接公网。 |
+| 公网 IPv4 / IPv6 UDP | WARP 内存栈做源地址转换。 | 按流使用宿主机 UDP socket。 |
+| Tailscale 出口 DNS | PeerAPI 检查客户端权限和查询名，再经 WARP 向 `1.1.1.1:53` 查询。 | 同样的 PeerAPI 校验，经宿主机连接 `1.1.1.1:53`。 |
+| 公网 IPv4 / IPv6 ICMP | 支持 echo 和流关联的 ICMP 错误，包括超时、不可达和 MTU 通知。 | 支持 echo。UDP socket 收到的不可达、Packet Too Big 等错误目前不会转成客户端侧 ICMP 报文。 |
 
-示例配置开启双栈 UDP 和 ICMP。UDP 路由与 TCP 中继共用当前 WARP 会话。公网测试中，HTTP/3、双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显在同一真实路径上双栈均超时；节点已观察到 IP 重组并向 WARP 发送分片，公网接收端抓包未看到分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。IPv6 邻居发现等链路本地控制报文只在所属链路内生效。
+`policy.udp: all` 允许任意公网目的端口，包括 DNS、QUIC 和 HTTP/3。`dns-only` 限制为 UDP/53。PeerAPI DNS 在两种模式下都使用 TCP。设置 `policy.icmp: true` 开启公网 echo。 直连在隔离网络中验证了双栈 1200 字节 UDP 回显。超过 Tailscale MTU 的 UDP 回包依赖客户端路径上的分片重组，2400 字节 IPv4 回显在 tsnet 客户端测试中超时。
 
-WARP 会话断开时，节点关闭该会话中的连接，并拒绝新的出口连接，直到隧道恢复。Tailnet 和 WARP 的外层连接使用宿主机网络。
+WARP 会话断开时，节点关闭该会话中的连接，并拒绝新的出口连接，直到隧道恢复。WARP 公网测试中，HTTP/3、双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显双栈均超时，节点已观察到 IP 重组并向 WARP 发送分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。
 
 ## 在 Linux 上运行
 
-需要 Go 1.26.4 或更新版本、一个可注册设备的 Tailnet 账号，以及可建立 MASQUE 连接的网络。在仓库根目录构建，本地修改的依赖由根模块的 `replace` 指向。
+需要 Go 1.26.4 或更新版本，以及一个可注册设备的 Tailnet 账号。WARP 模式还需要可建立 MASQUE 连接的网络。在仓库根目录构建，本地修改的依赖由根模块的 `replace` 指向。
 
 ```bash
 mkdir -p bin
@@ -32,12 +33,21 @@ cp config.example.yaml config.yaml
 install -d -m 700 state/warp state/tsnet
 ```
 
-**获取 WARP 凭据。** 已有 usque 注册文件可用 `install -m 600 /path/to/warp.json state/warp/config.json` 安装。首次注册可执行以下命令并按提示阅读和接受 Cloudflare 条款。
+**WARP 模式。** 省略 `egress.mode` 时使用 `warp`。已有 usque 注册文件可用 `install -m 600 /path/to/warp.json state/warp/config.json` 安装。首次注册可执行以下命令并按提示阅读和接受 Cloudflare 条款。
 
 ```bash
 (umask 077 && ./bin/usque -c state/warp/config.json register)
 chmod 600 state/warp/config.json
 ```
+
+**直连模式。** 在配置文件中设置以下选项。可以删除整个 `warp` 段并跳过 WARP 注册和 usque 构建。
+
+```yaml
+egress:
+  mode: direct
+```
+
+公网 IPv4 和 IPv6 分别使用服务进程所在网络命名空间的路由。宿主机应使用自己的公网出口，并避免将默认路由指回这个 Tailscale 出口。启用 `policy.icmp` 时，Linux 的 `net.ipv4.ping_group_range` 必须包含服务用户的组 ID，程序会在启动时检查双栈 ping socket 权限。可设 `policy.icmp: false` 仅运行 TCP 和 UDP。
 
 **加入 Tailnet。** 以下 Bash 命令交互式读取 Tailscale auth key。后续启动会复用 `state/tsnet` 中的设备身份。
 
@@ -46,7 +56,7 @@ read -rsp 'Tailscale auth key: ' tskey && echo
 TS_AUTHKEY="$tskey" ./bin/exitnode -config config.yaml
 ```
 
-在 Tailscale 管理后台批准该设备作为出口节点，再在客户端选择配置中的节点名并启用 Tailscale DNS。独立客户端可以用以下命令检查默认 DNS 和实际公网出口。trace 中应出现 `warp=on` 或 `warp=plus`。
+在 Tailscale 管理后台批准该设备作为出口节点，再在客户端选择配置中的节点名并启用 Tailscale DNS。独立客户端可以用以下命令检查默认 DNS 和实际公网出口。WARP 模式的 trace 应包含 `warp=on` 或 `warp=plus`。直连模式的 `ip=` 应与宿主机直接访问同一目标时一致。
 
 ```bash
 curl --noproxy '*' -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='
@@ -61,7 +71,7 @@ dig @100.100.100.100 example.com AAAA
 
 ## TCP 调优
 
-修改 YAML 后重启节点。缓冲区按连接设置，在客户端侧和 WARP 侧两个 TCP 栈上生效。拥塞算法和 BBR 参数作用于节点向 Tailscale 客户端发送数据的内层 TCP。[完整示例配置](config.example.yaml)
+修改 YAML 后重启节点。缓冲区按连接设置，在客户端侧 gVisor 栈及启用 WARP 时的公网侧 gVisor 栈上生效。两种出站模式下，拥塞算法和 BBR 参数都作用于节点向 Tailscale 客户端发送数据的内层 TCP。直连的公网侧 socket 使用宿主机 TCP 设置。[完整示例配置](config.example.yaml)
 
 | 配置项 | 可选值 | 示例配置 |
 |---|---|---|
@@ -127,6 +137,6 @@ WARP 接收路径使用基于 quic-go v0.59.0 的本地版本。QUIC 接收队�
   -bench '^Benchmark(ParseEnqueueReceiveDatagram|StreamDatagramQueue)$' . ./http3)
 ```
 
-`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
+`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。直连测试设置 `EXIT_EGRESS=direct`，并用 `EXIT_DIRECT_IPV4` 和 `EXIT_DIRECT_IPV6` 指定宿主机的公网出口地址。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
 
 本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE)、[usque](third_party/usque/LICENSE.md) 和 [quic-go](third_party/quic-go/LICENSE)。

@@ -469,7 +469,7 @@ func (ns *Impl) BeginTCPShutdown() int {
 			continue
 		}
 		switch ep.EndpointState() {
-		case tcp.StateSynRecv, tcp.StateEstablished, tcp.StateCloseWait, tcp.StateFinWait1, tcp.StateFinWait2:
+		case tcp.StateSynRecv, tcp.StateEstablished, tcp.StateCloseWait, tcp.StateFinWait1, tcp.StateFinWait2, tcp.StateClosing, tcp.StateLastAck:
 			ep.Abort()
 			count++
 		}
@@ -1609,6 +1609,7 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		dialIP = tsaddr.UnmapVia(dialIP)
 	}
 
+	var endpoint tcpip.Endpoint
 	defer func() {
 		if !isTailscaleIP {
 			// if this is a subnet IP, we added this in before the TCP handshake
@@ -1688,6 +1689,7 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		// gonet.TCPConn.RemoteAddr. The byte copies in both
 		// directions to/from the gonet.TCPConn in forwardTCP will
 		// block until the TCP handshake is complete.
+		endpoint = ep
 		return gonet.NewTCPConn(&wq, ep)
 	}
 
@@ -1728,6 +1730,11 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 				return
 			}
 			handler(c)
+			if ns.restrictedExit && !isTailscaleIP {
+				// The handler can return with paced data or a FIN still
+				// queued. Keep the source address usable until TCP closes.
+				endpoint.(*tcp.Endpoint).Wait()
+			}
 			return
 		}
 	}

@@ -367,7 +367,7 @@ func TestDatagramRingSelection(t *testing.T) {
 		want    bool
 	}{{"", true, false}, {"false", true, false}, {"true", false, false}, {"true", true, true}} {
 		t.Setenv("QUIC_GO_HTTP3_DATAGRAM_RING", tc.setting)
-		conn := newRawConn(nil, tc.enabled, nil, nil, nil, nil)
+		conn := newRawConn(nil, tc.enabled, func() {}, nil, nil, nil)
 		str := conn.TrackStream(client)
 		require.Equal(t, tc.want, str.useRing)
 		require.Nil(t, str.ring)

@@ -107,7 +107,7 @@ GOMAXPROCS=1 TS_NO_LOGS_NO_SUPPORT=true taskset -c 1 bin/exitbench \
   -test.cpu=1 -test.run '^TestExitSingleCoreTransfer$' -test.v
 ```
 
-s2 上启用 `runtime.udp_gso` 后，WireGuard 实际将多个数据报交给 Linux 做软件分段。一个直连端点保持稳定的测试时段内，单流三轮下载的中位数为 13.60 MB/s，16 流为 28.63 MB/s；空闲 RTT 为 177 ms，下载时的 RTT P95 分别为 178 和 179 ms。另一个时段在 24 流下出现过明显的延迟波动。详细的上传、下载系统调用及队列测量见[单核验收记录](docs/single-core.md)。
+s2 上启用 `runtime.udp_gso` 后，WireGuard 实际将多个数据报交给 Linux 做软件分段。一个直连端点保持稳定的测试时段内，单流三轮下载的中位数为 13.60 MB/s，16 流为 28.63 MB/s；空闲 RTT 为 177 ms，下载时的 RTT P95 分别为 178 和 179 ms。另一个时段在 24 流下出现过明显的延迟波动。详细的上传、下载系统调用、GSO 开关对照和 WARP 试验结果见验收记录。[单核验收记录](docs/single-core.md)
 
 ### 包处理和协议检查
 

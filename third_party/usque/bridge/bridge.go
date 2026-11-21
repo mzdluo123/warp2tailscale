@@ -19,6 +19,7 @@ import (
 	"github.com/Diniboy1123/usque/internal"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 var ErrWarpDown = errors.New("WARP tunnel unavailable")
@@ -89,7 +90,8 @@ func NewWithBuffers(parent context.Context, path string, send, receive int) (Bac
 }
 
 // NewRouted enables generation-scoped IP forwarding when a return path is supplied.
-func NewRouted(parent context.Context, path string, send, receive, queue int, clientRoutes func(context.Context) ([]netip.Prefix, error), deliver func([]byte) error) (Backend, error) {
+// The return path takes ownership of one reference to each delivered packet.
+func NewRouted(parent context.Context, path string, send, receive, queue int, clientRoutes func(context.Context) ([]netip.Prefix, error), deliver func(*stack.PacketBuffer) error) (Backend, error) {
 	if queue == 0 {
 		queue = 32
 	}

@@ -12,11 +12,13 @@ Tailscale 客户端 ⇄ WireGuard ⇄ tsnet ┬─ TCP 中继 ───┬─ WA
 | 流量 | 行为 |
 |---|---|
 | 公网 IPv4 / IPv6 TCP | 经 WARP 转发。节点向客户端发送的内层 TCP 支持 BBRv1、CUBIC 和 Reno。 |
-| 公网 IPv4 / IPv6 UDP | `policy.udp: all` 通过 WARP 内存栈做源地址转换，支持任意目的端口，包括 DNS、QUIC 和 HTTP/3。设为 `dns-only` 可限制为 UDP/53。 |
+| 公网 IPv4 / IPv6 UDP | `policy.udp: all` 通过 WARP 内存栈做源地址转换。默认只拦截发往 UDP/443 且识别为 QUIC 的数据包；同端口的非 QUIC 数据包仍会转发。设为 `dns-only` 可限制为 UDP/53。 |
 | Tailscale 出口 DNS | PeerAPI 检查客户端权限和查询名，然后通过 WARP 向 `1.1.1.1:53` 发送 DNS-over-TCP 查询。 |
 | 公网 IPv4 / IPv6 ICMP | `policy.icmp: true` 开启公网 echo 及流关联的 ICMP 错误，包括超时、不可达和 MTU 通知。由内存路由器处理 TTL、校验和与错误内嵌的原始报文。 |
 
-示例配置开启双栈 UDP 和 ICMP。UDP 路由与 TCP 中继共用当前 WARP 会话。公网测试中，HTTP/3、双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显在同一真实路径上双栈均超时；节点已观察到 IP 重组并向 WARP 发送分片，公网接收端抓包未看到分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。IPv6 邻居发现等链路本地控制报文只在所属链路内生效。
+拦截依据 QUIC v1/v2 的长包头，静默丢弃 Initial、0-RTT 和 Handshake，不猜测短包头或未知版本。支持回退的 HTTP/3 客户端可改用 TCP；仅支持 QUIC 的连接会失败。设 `policy.block_quic_443: false` 并重启可恢复 UDP/443 上的 QUIC 转发。此开关不影响 WARP 自身的 MASQUE HTTP/3 隧道。
+
+示例配置开启双栈 UDP 和 ICMP。UDP 路由与 TCP 中继共用当前 WARP 会话。公网测试中，允许 QUIC 转发时 HTTP/3 可用；双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显在同一真实路径上双栈均超时；节点已观察到 IP 重组并向 WARP 发送分片，公网接收端抓包未看到分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。IPv6 邻居发现等链路本地控制报文只在所属链路内生效。
 
 WARP 会话断开时，节点关闭该会话中的连接，并拒绝新的出口连接，直到隧道恢复。Tailnet 和 WARP 的外层连接使用宿主机网络。
 
@@ -72,6 +74,7 @@ dig @100.100.100.100 example.com AAAA
 | `congestion.max_pacing_bytes_per_second` | 每条客户端方向 TCP 的 pacing 速率上限，0 由 BBR 估算 | 0 |
 | `warp.http3_receive_ring` | 启用 32 槽 HTTP/3 数据报接收环形队列。两种队列的容量均为 32，重启生效。 | `false` |
 | `warp.packet_queue_packets` | WARP 出口队列容量，1–256 包，0 使用默认值 32 | 32 |
+| `policy.block_quic_443` | 公网出口识别并丢弃发往 UDP/443 的 QUIC；省略时默认开启。 | `true` |
 | `runtime.max_procs` | Go 同时执行的逻辑处理器数，0 使用运行时默认值 | 1 |
 | `runtime.udp_gso` | `true` 允许 WireGuard 和 MASQUE 使用 UDP GSO，`false` 在本进程禁用。省略时沿用两个库的环境设置。重启后生效。 | `true` |
 | `tcp.send_buffer_bytes` | 4096–67108864 字节，0 使用栈默认值 | 8388608（8 MiB） |
@@ -127,6 +130,8 @@ WARP 接收路径使用基于 quic-go v0.59.0 的本地版本。QUIC 接收队�
   -bench '^Benchmark(ParseEnqueueReceiveDatagram|StreamDatagramQueue)$' . ./http3)
 ```
 
-`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
+Tailscale 发包、gVisor 收包和 MASQUE 前缀组装的拷贝优化、基准命令及结果见[单核验收记录](docs/single-core.md#减少数据路径上的暂存拷贝)。
 
-本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE)、[usque](third_party/usque/LICENSE.md) 和 [quic-go](third_party/quic-go/LICENSE)。
+`bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、QUIC 拦截时的 TCP 回退和公网 echo。关闭 `policy.block_quic_443` 后，使用 `EXIT_BLOCK_QUIC_443=false bash scripts/test-mvp.sh client` 验证 HTTP/3 可用。测试 DNS-only 策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
+
+本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE)、[usque](third_party/usque/LICENSE.md)、[quic-go](third_party/quic-go/LICENSE) 和 [CONNECT-IP](third_party/connect-ip-go/LICENSE)。

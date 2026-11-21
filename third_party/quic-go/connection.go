@@ -3022,23 +3022,35 @@ func (c *Conn) onStreamCompleted(id protocol.StreamID) {
 // In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
 // If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 func (c *Conn) SendDatagram(p []byte) error {
+	return c.SendDatagramParts(p)
+}
+
+// SendDatagramParts is like SendDatagram, but sends the supplied slices as one
+// datagram, in order. The slices are not retained after the call returns.
+func (c *Conn) SendDatagramParts(parts ...[]byte) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
 
-	f := &wire.DatagramFrame{DataLenPresent: true}
 	// The payload size estimate is conservative.
 	// Under many circumstances we could send a few more bytes.
 	maxDataLen := min(
-		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
+		(&wire.DatagramFrame{DataLenPresent: true}).MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
 		protocol.ByteCount(c.currentMTUEstimate.Load()),
 	)
-	if protocol.ByteCount(len(p)) > maxDataLen {
-		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+	var dataLen protocol.ByteCount
+	for _, p := range parts {
+		partLen := protocol.ByteCount(len(p))
+		if partLen > maxDataLen-dataLen {
+			return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+		}
+		dataLen += partLen
 	}
-	f.Data = make([]byte, len(p))
-	copy(f.Data, p)
-	return c.datagramQueue.Add(f)
+	data := make([]byte, 0, dataLen)
+	for _, p := range parts {
+		data = append(data, p...)
+	}
+	return c.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: data})
 }
 
 // ReceiveDatagram gets a message received in a QUIC datagram, as specified in RFC 9221.

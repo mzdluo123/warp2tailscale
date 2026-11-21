@@ -431,7 +431,8 @@ func TestConnSendAndReceiveDatagram(t *testing.T) {
 	require.Equal(t, []byte("bar"), data)
 
 	// now send a datagram
-	require.NoError(t, datagramStr.SendDatagram([]byte("foobaz")))
+	request := &RequestStream{str: &Stream{datagramStream: datagramStr}}
+	require.NoError(t, request.SendDatagram([]byte("foobaz")))
 
 	expected := quicvarint.Append([]byte{}, strID/4)
 	expected = append(expected, []byte("foobaz")...)
@@ -450,6 +451,23 @@ func TestConnSendAndReceiveDatagram(t *testing.T) {
 	data, err = serverConn.ReceiveDatagram(ctx)
 	require.NoError(t, err)
 	require.Equal(t, expected, data)
+
+	// The prefix is part of the HTTP Datagram payload, after the quarter stream ID.
+	require.NoError(t, request.SendDatagramWithPrefix([]byte{0}, []byte("payload")))
+	expected = append(quicvarint.Append(nil, strID/4), 0)
+	expected = append(expected, "payload"...)
+	data, err = serverConn.ReceiveDatagram(ctx)
+	require.NoError(t, err)
+	require.Equal(t, expected, data)
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.DatagramCreated{
+				QuaterStreamID: strID / 4,
+				Raw:            qlog.RawInfo{PayloadLength: 8, Length: len(expected)},
+			},
+		},
+		eventRecorder.Events(qlog.DatagramCreated{}),
+	)
 }
 
 func TestConnDatagramFailures(t *testing.T) {

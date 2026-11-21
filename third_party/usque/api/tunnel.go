@@ -272,10 +272,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		go func() {
 			defer pumps.Done()
-			buf := packetBufferPool.Get()
-			defer packetBufferPool.Put(buf)
 			for {
-				n, err := ipConn.ReadPacket(buf, true)
+				pkt, err := ipConn.ReadPacketSlice(true)
 				if err != nil {
 					if cfg.OpenDevice != nil || errors.As(err, new(*connectip.CloseError)) {
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
@@ -284,7 +282,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error reading from IP connection: %v, continuing...", err)
 					continue
 				}
-				if err := device.WritePacket(buf[:n]); err != nil {
+				// Match ReadPacket's truncation after validating the full packet.
+				n := min(len(pkt), cfg.MTU)
+				if err := device.WritePacket(pkt[:n:n]); err != nil {
 					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
 					return
 				}

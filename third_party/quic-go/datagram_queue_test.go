@@ -198,6 +198,70 @@ func TestDatagramQueueClose(t *testing.T) {
 	})
 }
 
+func TestSendDatagramParts(t *testing.T) {
+	c := &Conn{
+		peerParams:    &wire.TransportParameters{MaxDatagramFrameSize: 64},
+		datagramQueue: newDatagramQueue(func() {}, utils.DefaultLogger),
+		version:       protocol.Version1,
+	}
+	c.currentMTUEstimate.Store(8)
+	quarterStreamID, contextID, payload := []byte{0x40, 0x40}, []byte{0}, []byte("hello")
+	require.NoError(t, c.SendDatagramParts(quarterStreamID, contextID, payload))
+	clear(quarterStreamID)
+	contextID[0] = 1
+	clear(payload)
+	frame := c.datagramQueue.Peek()
+	require.NotNil(t, frame)
+	require.True(t, frame.DataLenPresent)
+	require.Equal(t, []byte("\x40\x40\x00hello"), frame.Data)
+	c.datagramQueue.Pop()
+
+	var tooLarge *DatagramTooLargeError
+	require.ErrorAs(t, c.SendDatagramParts(quarterStreamID, contextID, []byte("longer")), &tooLarge)
+	require.EqualValues(t, 8, tooLarge.MaxDatagramPayloadSize)
+	require.Nil(t, c.datagramQueue.Peek())
+
+	c.currentMTUEstimate.Store(64)
+	c.peerParams.MaxDatagramFrameSize = 9
+	require.ErrorAs(t, c.SendDatagramParts(quarterStreamID, contextID, payload), &tooLarge)
+	require.EqualValues(t, 7, tooLarge.MaxDatagramPayloadSize)
+	require.Nil(t, c.datagramQueue.Peek())
+}
+
+func BenchmarkSendDatagramParts(b *testing.B) {
+	quarterStreamID, contextID, payload := []byte{0x40, 0x40}, []byte{0}, make([]byte, 1280)
+	run := func(b *testing.B, send func(*Conn) error) {
+		c := &Conn{
+			peerParams:    &wire.TransportParameters{MaxDatagramFrameSize: wire.MaxDatagramSize},
+			datagramQueue: newDatagramQueue(func() {}, utils.DefaultLogger),
+			version:       protocol.Version1,
+		}
+		c.currentMTUEstimate.Store(1400)
+		b.SetBytes(int64(len(payload)))
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := send(c); err != nil {
+				b.Fatal(err)
+			}
+			c.datagramQueue.Pop()
+		}
+	}
+	b.Run("staged", func(b *testing.B) {
+		run(b, func(c *Conn) error {
+			ipDatagram := append(make([]byte, 0, len(contextID)+len(payload)), contextID...)
+			ipDatagram = append(ipDatagram, payload...)
+			httpDatagram := append(make([]byte, 0, 8+len(ipDatagram)), quarterStreamID...)
+			httpDatagram = append(httpDatagram, ipDatagram...)
+			return c.SendDatagram(httpDatagram)
+		})
+	})
+	b.Run("parts", func(b *testing.B) {
+		run(b, func(c *Conn) error {
+			return c.SendDatagramParts(quarterStreamID, contextID, payload)
+		})
+	})
+}
+
 func BenchmarkParseEnqueueReceiveDatagram(b *testing.B) {
 	packet := make([]byte, 1200)
 	parser := wire.NewFrameParser(true, false, false)

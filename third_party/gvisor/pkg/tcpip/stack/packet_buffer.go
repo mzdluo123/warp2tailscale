@@ -264,6 +264,15 @@ func (pk *PacketBuffer) Size() int {
 	return int(pk.buf.Size()) - pk.headerOffset()
 }
 
+// CopyNetworkPacket copies the network header, transport header and payload
+// into dst, without including link headers or reserved headroom.
+// It returns the number of bytes copied.
+func (pk *PacketBuffer) CopyNetworkPacket(dst []byte) int {
+	offset := pk.headerOffset() + pk.headers[virtioNetHeader].length + pk.headers[linkHeader].length
+	n, _ := pk.buf.ReadAt(dst, int64(offset))
+	return n
+}
+
 // MemSize returns the estimation size of the pk in memory, including backing
 // buffer data.
 func (pk *PacketBuffer) MemSize() int {

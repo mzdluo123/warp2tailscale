@@ -25,7 +25,7 @@ type datagramStream interface {
 	SetDeadline(time.Time) error
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
-	SendDatagram(b []byte) error
+	SendDatagramWithPrefix(prefix, b []byte) error
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 
 	QUICStream() *quic.Stream
@@ -144,8 +144,14 @@ func (s *Stream) StreamID() quic.StreamID {
 }
 
 func (s *Stream) SendDatagram(b []byte) error {
+	return s.SendDatagramWithPrefix(nil, b)
+}
+
+// SendDatagramWithPrefix sends an HTTP Datagram containing prefix followed by b.
+// Neither slice is retained after the call returns.
+func (s *Stream) SendDatagramWithPrefix(prefix, b []byte) error {
 	// TODO: reject if datagrams are not negotiated (yet)
-	return s.datagramStream.SendDatagram(b)
+	return s.datagramStream.SendDatagramWithPrefix(prefix, b)
 }
 
 func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -270,6 +276,12 @@ func (s *RequestStream) SetDeadline(t time.Time) error {
 // as the server might drop datagrams which it can't associate with an existing request.
 func (s *RequestStream) SendDatagram(b []byte) error {
 	return s.str.SendDatagram(b)
+}
+
+// SendDatagramWithPrefix is like SendDatagram, but sends prefix followed by b.
+// Neither slice is retained after the call returns.
+func (s *RequestStream) SendDatagramWithPrefix(prefix, b []byte) error {
+	return s.str.SendDatagramWithPrefix(prefix, b)
 }
 
 // ReceiveDatagram receives HTTP Datagrams (RFC 9297).

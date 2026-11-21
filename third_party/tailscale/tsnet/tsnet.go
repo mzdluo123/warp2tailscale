@@ -159,6 +159,7 @@ import (
 	"time"
 
 	"github.com/tailscale/wireguard-go/tun"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"tailscale.com/client/local"
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
@@ -705,12 +706,14 @@ func (s *Server) CertDomains() []string {
 	return slices.Clone(nm.DNS.CertDomains)
 }
 
-// WriteExitPacket delivers a routed reply to a tailnet peer.
-func (s *Server) WriteExitPacket(p []byte) error {
+// WriteExitPacket delivers a routed reply to a tailnet peer, taking ownership
+// of one reference to the packet, including on failure.
+func (s *Server) WriteExitPacket(p *stack.PacketBuffer) error {
 	if err := s.Start(); err != nil {
+		p.DecRef()
 		return err
 	}
-	return s.sys.Tun.Get().InjectOutbound(p)
+	return s.sys.Tun.Get().InjectOutboundPacketBuffer(p)
 }
 
 // BeginExitTCPShutdown starts rejecting new TCP connections and resets

@@ -878,18 +878,21 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 		stats.MalformedPacketsReceived.Increment()
 		return
 	}
-	h := header.IPv4(hView.AsSlice())
-	defer hView.Release()
+	validatedHeader := header.IPv4(hView.AsSlice())
+	srcAddr, dstAddr := validatedHeader.SourceAddress(), validatedHeader.DestinationAddress()
+	// The address checks only need values. Release the view before accessing
+	// the packet's writable headers for prerouting or delivery.
+	hView.Release()
 
 	if !e.nic.IsLoopback() {
 		if !e.protocol.options.AllowExternalLoopbackTraffic {
-			if header.IsV4LoopbackAddress(h.SourceAddress()) {
+			if header.IsV4LoopbackAddress(srcAddr) {
 				martianPacketLogger.Infof("Martian packet dropped with loopback source address. If your traffic is unexpectedly dropped, you may want to allow martian packets.")
 				stats.InvalidSourceAddressesReceived.Increment()
 				return
 			}
 
-			if header.IsV4LoopbackAddress(h.DestinationAddress()) {
+			if header.IsV4LoopbackAddress(dstAddr) {
 				martianPacketLogger.Infof("Martian packet dropped with loopback destination address. If your traffic is unexpectedly dropped, you may want to allow martian packets.")
 				stats.InvalidDestinationAddressesReceived.Increment()
 				return
@@ -898,7 +901,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 
 		stk := e.protocol.stack
 		if stk.HandleLocal() {
-			addressEndpoint := e.AcquireAssignedAddress(header.IPv4(pkt.NetworkHeader().Slice()).SourceAddress(), e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */)
+			addressEndpoint := e.AcquireAssignedAddress(srcAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */)
 			if addressEndpoint != nil {
 				// The source address is one of our own, so we never should have gotten
 				// a packet like this unless HandleLocal is false or our NIC is the
@@ -927,7 +930,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	}
 	// CheckPrerouting can modify the backing storage of the packet, so refresh
 	// the header.
-	h = header.IPv4(pkt.NetworkHeader().Slice())
+	h := header.IPv4(pkt.NetworkHeader().Slice())
 	e.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
 }
 

@@ -117,7 +117,9 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream, 
 }
 
 func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
-	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
+	hstr := newStateTrackingStream(str, c, func(prefix, b []byte) error {
+		return c.sendDatagram(str.StreamID(), prefix, b)
+	})
 
 	c.streamMx.Lock()
 	hstr.useRing = c.useDatagramRing
@@ -253,22 +255,21 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 	}
 }
 
-func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
-	// TODO: this creates a lot of garbage and an additional copy
-	data := make([]byte, 0, len(b)+8)
+func (c *rawConn) sendDatagram(streamID quic.StreamID, prefix, b []byte) error {
 	quarterStreamID := uint64(streamID / 4)
-	data = quicvarint.Append(data, uint64(streamID/4))
-	data = append(data, b...)
+	var buf [8]byte
+	header := quicvarint.Append(buf[:0], quarterStreamID)
 	if c.qlogger != nil {
+		payloadLen := len(prefix) + len(b)
 		c.qlogger.RecordEvent(qlog.DatagramCreated{
 			QuaterStreamID: quarterStreamID,
 			Raw: qlog.RawInfo{
-				Length:        len(data),
-				PayloadLength: len(b),
+				Length:        len(header) + payloadLen,
+				PayloadLength: payloadLen,
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	return c.conn.SendDatagramParts(header, prefix, b)
 }
 
 func (c *rawConn) receiveDatagrams() error {

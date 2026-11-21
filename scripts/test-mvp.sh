@@ -15,7 +15,9 @@ case ${1:-local} in
     CGO_ENABLED=0 go build -o bin/warp-smoke ./cmd/warp-smoke
     CGO_ENABLED=0 go build -tags mvptest -o bin/exitnode-test ./cmd/exitnode
     go test ./...
-    (cd third_party/quic-go && go test -run '^Test(ReceivedDatagram(OwnsPayload|RingWrapAndOverflow)|DatagramRingSelection)$' . ./http3)
+    (cd third_party/quic-go && go test -run '^Test(ReceivedDatagram(OwnsPayload|RingWrapAndOverflow)|DatagramRingSelection|SendDatagramParts|ConnSendAndReceiveDatagram)$' . ./http3)
+    (cd third_party/connect-ip-go && go test .)
+    go test -run '^Test(InjectedScatterPacket|CloseReleasesInjectedPacket|UDPReceiveIPv6Ownership)$' tailscale.com/net/tstun gvisor.dev/gvisor/pkg/tcpip/network/ipv6
     go test tailscale.com/net/batching tailscale.com/wgengine/netstack/gro gvisor.dev/gvisor/pkg/buffer gvisor.dev/gvisor/pkg/tcpip/stack
     go test -run "^TestReceiveBatchBindBuffers$" tailscale.com/wgengine/magicsock
     go test -count=1 -run "TestExitTCPShutdown|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
@@ -44,9 +46,15 @@ case ${1:-local} in
       answer=$(client dig +time=5 +tries=3 +noall +answer "@$resolver" example.com "$type")
       grep -E "[[:space:]]$type[[:space:]]" <<<"$answer"
       if [[ ${EXIT_UDP_POLICY:-all} == all ]]; then
-        quic=$(client curl -q --http3-only --noproxy '*' --max-time 20 "-$fam" --resolve "www.cloudflare.com:443:$addr" -fsS https://www.cloudflare.com/cdn-cgi/trace -w 'http=%{http_version}\n')
+        h3=(--http3)
+        expected='^http=(1\.1|2)$'
+        if [[ ${EXIT_BLOCK_QUIC_443:-true} == false ]]; then
+          h3=(--http3-only)
+          expected='^http=3$'
+        fi
+        quic=$(client curl -q "${h3[@]}" --noproxy '*' --max-time 20 "-$fam" --resolve "www.cloudflare.com:443:$addr" -fsS https://www.cloudflare.com/cdn-cgi/trace -w 'http=%{http_version}\n')
         grep -Eq '^warp=(on|plus)$' <<<"$quic"
-        grep -Fx 'http=3' <<<"$quic"
+        grep -E "$expected" <<<"$quic"
       fi
       if [[ ${EXIT_ICMP:-true} == true ]]; then
         client ping "-$fam" -n -c 2 -W 3 "$resolver"

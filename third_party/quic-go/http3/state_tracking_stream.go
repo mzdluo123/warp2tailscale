@@ -22,7 +22,7 @@ const streamDatagramQueueLen = 32
 type stateTrackingStream struct {
 	*quic.Stream
 
-	sendDatagram func([]byte) error
+	sendDatagram func(prefix, b []byte) error
 	hasData      chan struct{}
 	queue        [][]byte
 	useRing      bool
@@ -41,7 +41,7 @@ type streamClearer interface {
 	clearStream(quic.StreamID)
 }
 
-func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
+func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func(prefix, b []byte) error) *stateTrackingStream {
 	t := &stateTrackingStream{
 		Stream:       s,
 		clearer:      clearer,
@@ -116,7 +116,7 @@ func (s *stateTrackingStream) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (s *stateTrackingStream) SendDatagram(b []byte) error {
+func (s *stateTrackingStream) SendDatagramWithPrefix(prefix, b []byte) error {
 	s.mx.Lock()
 	sendErr := s.sendErr
 	s.mx.Unlock()
@@ -124,7 +124,7 @@ func (s *stateTrackingStream) SendDatagram(b []byte) error {
 		return sendErr
 	}
 
-	return s.sendDatagram(b)
+	return s.sendDatagram(prefix, b)
 }
 
 func (s *stateTrackingStream) signalHasDatagram() {

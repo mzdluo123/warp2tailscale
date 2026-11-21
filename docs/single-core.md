@@ -128,3 +128,27 @@ s2 全部服务线程固定在 CPU 1。生产版本使用软件 UDP GSO、内层
 | 24 | 23.62 → 30.86、28.32 | 43.33 → 33.20、35.33 | 189 → 185、186 |
 
 升级后单流下载为 19.01 MB/s。四路 HTTPS 上传合计交付 32 MiB，吞吐为 3.57 MB/s，四个请求均返回 HTTP 200。客户端通过出口完成 IPv4、IPv6 的 UDP DNS、ICMP Echo、HTTPS 和 HTTP/3 检查，WARP 检查返回 `warp=on`。16 并发最后一轮的节点负载 P95 比空闲高 16 ms，仍需较长观察才能判断尾延迟的变化。
+
+## 减少数据路径上的暂存拷贝
+
+- Tailscale 将 gVisor 发来的各段直接写入 WireGuard 发送缓冲，不先展平成临时切片。WARP 路由返回的 UDP/ICMP 包也移交一个包引用，在同一位置复制；读取或关闭队列时释放引用。
+- gVisor 在进入入站过滤前释放校验视图；IPv6 无扩展头的 TCP、UDP 和 ICMPv6 本地交付不再构建扩展头迭代器。保留防火墙执行后的包头读取及传输层交付所需的所有权隔离。
+- MASQUE 直接交付 CONNECT-IP 接收载荷，不复制到 MTU 暂存缓冲。发送时将 CONNECT-IP 和 HTTP/3 前缀及载荷一次写入 QUIC 队列自有缓冲；保留包长检查、MTU 截断和加密缓冲。
+
+本地 Linux（WSL2，Core Ultra 7 270K Plus，Go 1.27.3）固定在同一逻辑 CPU 上交替运行对照。发包和 MASQUE 各 5 轮，IP 接收各 3 轮，取中位数。MASQUE 基准对照重建旧的两级暂存，只计帧组装和入队，不计加密、网络或对端处理。
+
+| 片段 | 耗时 ns/op，前 → 后 | 堆分配 B/op，前 → 后 |
+|---|---:|---:|
+| Tailscale 发送，1200 字节 TCP 载荷 | 263.8 → 66.1 | 1280 → 0 |
+| Tailscale 发送，8 段 TCP GSO | 1540 → 411 | 9728 → 0 |
+| gVisor IPv4 UDP 接收 | 571.6 → 541.9 | 0 → 0 |
+| gVisor IPv6 UDP 接收 | 812.6 → 553.6 | 160 → 80 |
+| MASQUE DATAGRAM 组装和入队，1280 字节 | 434.4 → 162.4 | 4256 → 1440 |
+
+```sh
+go test tailscale.com/net/tstun -run '^$' -bench '^BenchmarkExitInjectedPacket$' -benchmem -cpu 1
+go -C third_party/gvisor test ./pkg/tcpip/network/ipv6 -run '^$' -bench '^BenchmarkUDPReceive$' -benchmem -cpu 1
+go -C third_party/quic-go test . -run '^$' -bench '^BenchmarkSendDatagramParts$' -benchmem -cpu 1
+```
+
+512 MiB 的 `TestExitSingleCoreTransfer` 在普通本地网络环境中前后均有快慢两档，无法稳定归因。在只启用 loopback 的独立网络命名空间里，前后各 3 轮，UDP 套接字接收错误增量均为 0；中位吞吐为 **403.28 → 463.37 MB/s**，CPU 为 **2.600 → 2.263 ms/MiB**，负载小请求 P95 为 **3.27 → 2.54 ms**。该测试覆盖两个本地 Tailscale 端点，不经过公网 WARP 或 s2；不能外推为公网吞吐提升。

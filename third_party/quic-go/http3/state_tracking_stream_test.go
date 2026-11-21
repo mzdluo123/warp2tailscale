@@ -48,7 +48,7 @@ func checkDatagramReceive(t *testing.T, str *stateTrackingStream) {
 
 func checkDatagramSend(t *testing.T, str *stateTrackingStream) {
 	t.Helper()
-	require.NoError(t, str.SendDatagram([]byte("test")))
+	require.NoError(t, str.SendDatagramWithPrefix(nil, []byte("test")))
 }
 
 type mockStreamClearer struct {
@@ -72,7 +72,7 @@ func testStateTrackingStreamRead(t *testing.T, reset bool) {
 	client, server := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	// deadline errors are ignored
 	client.SetReadDeadline(time.Now())
@@ -111,14 +111,14 @@ func testStateTrackingStreamRead(t *testing.T, reset bool) {
 	_, err = str.ReceiveDatagram(canceledCtx())
 	require.ErrorIs(t, err, expectedErr)
 	// the send side is still open
-	require.NoError(t, str.SendDatagram([]byte("foo")))
+	require.NoError(t, str.SendDatagramWithPrefix(nil, []byte("foo")))
 }
 
 func TestStateTrackingStreamRemoteCancelation(t *testing.T) {
 	client, server := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	_, err := str.Write([]byte("foo"))
 	require.NoError(t, err)
@@ -146,14 +146,14 @@ func TestStateTrackingStreamRemoteCancelation(t *testing.T) {
 	require.ErrorIs(t, writeErr, expectedErr)
 	require.Nil(t, clearer.cleared)
 	checkDatagramReceive(t, str)
-	require.ErrorIs(t, str.SendDatagram([]byte("test")), expectedErr)
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("test")), expectedErr)
 }
 
 func TestStateTrackingStreamLocalCancelation(t *testing.T) {
 	client, _ := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	_, err := str.Write([]byte("foobar"))
 	require.NoError(t, err)
@@ -164,14 +164,14 @@ func TestStateTrackingStreamLocalCancelation(t *testing.T) {
 	str.CancelWrite(1337)
 	require.Nil(t, clearer.cleared)
 	checkDatagramReceive(t, str)
-	require.ErrorIs(t, str.SendDatagram([]byte("test")), &quic.StreamError{StreamID: client.StreamID(), ErrorCode: 1337})
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("test")), &quic.StreamError{StreamID: client.StreamID(), ErrorCode: 1337})
 }
 
 func TestStateTrackingStreamClose(t *testing.T) {
 	client, _ := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	require.Nil(t, clearer.cleared)
 	checkDatagramReceive(t, str)
@@ -179,7 +179,7 @@ func TestStateTrackingStreamClose(t *testing.T) {
 
 	require.NoError(t, client.Close())
 	require.Eventually(t, func() bool {
-		err := str.SendDatagram([]byte("test"))
+		err := str.SendDatagramWithPrefix(nil, []byte("test"))
 		if err == nil {
 			return false
 		}
@@ -195,7 +195,7 @@ func TestStateTrackingStreamReceiveThenSend(t *testing.T) {
 	client, server := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	_, err := server.Write([]byte("foobar"))
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestStateTrackingStreamReceiveThenSend(t *testing.T) {
 	id := client.StreamID()
 	_, err = str.Write([]byte("bar"))
 	require.ErrorIs(t, err, &quic.StreamError{StreamID: id, ErrorCode: 123})
-	require.ErrorIs(t, str.SendDatagram([]byte("test")), &quic.StreamError{StreamID: id, ErrorCode: 123})
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("test")), &quic.StreamError{StreamID: id, ErrorCode: 123})
 
 	require.Equal(t, &id, clearer.cleared)
 }
@@ -222,7 +222,7 @@ func TestStateTrackingStreamSendThenReceive(t *testing.T) {
 	client, server := newStreamPair(t)
 
 	var clearer mockStreamClearer
-	str := newStateTrackingStream(client, &clearer, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, &clearer, func([]byte, []byte) error { return nil })
 
 	server.CancelRead(1234)
 
@@ -235,7 +235,7 @@ func TestStateTrackingStreamSendThenReceive(t *testing.T) {
 	expectedErr := &quic.StreamError{Remote: true, StreamID: id, ErrorCode: 1234}
 	require.ErrorIs(t, writeErr, expectedErr)
 	require.Nil(t, clearer.cleared)
-	require.ErrorIs(t, str.SendDatagram([]byte("test")), expectedErr)
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("test")), expectedErr)
 
 	_, err := server.Write([]byte("foobar"))
 	require.NoError(t, err)
@@ -252,7 +252,7 @@ func TestStateTrackingStreamSendThenReceive(t *testing.T) {
 func TestDatagramReceiving(t *testing.T) {
 	client, _ := newStreamPair(t)
 
-	str := newStateTrackingStream(client, nil, func(b []byte) error { return nil })
+	str := newStateTrackingStream(client, nil, func([]byte, []byte) error { return nil })
 	type result struct {
 		data []byte
 		err  error
@@ -303,19 +303,19 @@ func TestDatagramSending(t *testing.T) {
 	errors := []error{nil, nil, assert.AnError}
 	client, _ := newStreamPair(t)
 
-	str := newStateTrackingStream(client, nil, func(b []byte) error {
-		sendQueue = append(sendQueue, b)
+	str := newStateTrackingStream(client, nil, func(prefix, b []byte) error {
+		sendQueue = append(sendQueue, append(prefix, b...))
 		err := errors[0]
 		errors = errors[1:]
 		return err
 	})
-	require.NoError(t, str.SendDatagram([]byte("foo")))
-	require.NoError(t, str.SendDatagram([]byte("bar")))
-	require.ErrorIs(t, str.SendDatagram([]byte("baz")), assert.AnError)
-	require.Equal(t, [][]byte{[]byte("foo"), []byte("bar"), []byte("baz")}, sendQueue)
+	require.NoError(t, str.SendDatagramWithPrefix(nil, []byte("foo")))
+	require.NoError(t, str.SendDatagramWithPrefix([]byte{0}, []byte("bar")))
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("baz")), assert.AnError)
+	require.Equal(t, [][]byte{[]byte("foo"), []byte("\x00bar"), []byte("baz")}, sendQueue)
 
 	str.closeSend(net.ErrClosed)
-	require.ErrorIs(t, str.SendDatagram([]byte("foobar")), net.ErrClosed)
+	require.ErrorIs(t, str.SendDatagramWithPrefix(nil, []byte("foobar")), net.ErrClosed)
 }
 
 func TestReceivedDatagramRingWrapAndOverflow(t *testing.T) {

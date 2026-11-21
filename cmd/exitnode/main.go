@@ -20,11 +20,11 @@ import (
 	"github.com/Diniboy1123/usque/bridge"
 	"gopkg.in/yaml.v3"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"tailscale.com/ipn"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tsnet"
-	"tailscale.com/types/ipproto"
 	"tailscale.com/types/nettype"
 
 	"warp2tailscale/internal/exit"
@@ -68,14 +68,16 @@ type config struct {
 		BurstWindow time.Duration `yaml:"pacing_burst_window"`
 	}
 	Policy struct {
-		UDP        string
-		ICMP       bool
-		IPv4, IPv6 bool
+		UDP          string
+		BlockQUIC443 bool `yaml:"block_quic_443"`
+		ICMP         bool
+		IPv4, IPv6   bool
 	}
 }
 
 func load(path string) (config, error) {
 	var cfg config
+	cfg.Policy.BlockQUIC443 = true
 	f, e := os.Open(path)
 	if e != nil {
 		return cfg, e
@@ -168,7 +170,7 @@ func run(ctx context.Context, cfg config) error {
 		}
 		return routes, nil
 	}
-	var deliver func([]byte) error
+	var deliver func(*stack.PacketBuffer) error
 	if cfg.Policy.UDP == "all" || cfg.Policy.ICMP {
 		deliver = s.WriteExitPacket
 	}
@@ -196,22 +198,7 @@ func run(ctx context.Context, cfg config) error {
 			p.SourceFragmented = true
 			return true
 		}
-		s.ExitPacket = func(p *packet.Parsed) bool {
-			switch p.IPProto {
-			case ipproto.UDP:
-				if cfg.Policy.UDP != "all" {
-					return false
-				}
-			case ipproto.ICMPv4, ipproto.ICMPv6:
-				if !cfg.Policy.ICMP {
-					return false
-				}
-			default:
-				return false
-			}
-			warp.ForwardPacket(p.Src.Addr(), p.Dst.Addr(), p.Buffer(), p.SourceFragmented)
-			return true
-		}
+		s.ExitPacket = cfg.exitPacketHandler(warp.ForwardPacket)
 	}
 	s.ExitDNSForward = func(ctx context.Context, q []byte, src netip.AddrPort) ([]byte, error) {
 		answer, err := exit.PeerDNS(ctx, q, warp.DialTCP)

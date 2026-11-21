@@ -12,6 +12,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"tailscale.com/net/packet"
 )
 
@@ -45,7 +46,10 @@ func TestForwardedUDPError(t *testing.T) {
 				internet.Close()
 			}()
 			result := make(chan []byte, 2)
-			f, err := n.EnableForwarding(ctx, []netip.Prefix{netip.MustParsePrefix(prefix)}, func(p []byte) error {
+			f, err := n.EnableForwarding(ctx, []netip.Prefix{netip.MustParsePrefix(prefix)}, func(pkt *stack.PacketBuffer) error {
+				p := make([]byte, pkt.Size())
+				p = p[:pkt.CopyNetworkPacket(p)]
+				pkt.DecRef()
 				select {
 				case result <- p:
 				case <-ctx.Done():

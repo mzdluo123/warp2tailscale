@@ -1143,21 +1143,24 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 		stats.MalformedPacketsReceived.Increment()
 		return
 	}
-	defer hView.Release()
-	h := header.IPv6(hView.AsSlice())
+	validatedHeader := header.IPv6(hView.AsSlice())
+	srcAddr, dstAddr := validatedHeader.SourceAddress(), validatedHeader.DestinationAddress()
+	// The address checks only need values. Release the view before accessing
+	// the packet's writable headers for prerouting or delivery.
+	hView.Release()
 
-	if !checkV4Mapped(h, stats) {
+	if !checkV4Mapped(srcAddr, dstAddr, stats) {
 		return
 	}
 
 	if !e.nic.IsLoopback() {
 		if !e.protocol.options.AllowExternalLoopbackTraffic {
-			if header.IsV6LoopbackAddress(h.SourceAddress()) {
+			if header.IsV6LoopbackAddress(srcAddr) {
 				stats.InvalidSourceAddressesReceived.Increment()
 				return
 			}
 
-			if header.IsV6LoopbackAddress(h.DestinationAddress()) {
+			if header.IsV6LoopbackAddress(dstAddr) {
 				stats.InvalidDestinationAddressesReceived.Increment()
 				return
 			}
@@ -1165,7 +1168,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 
 		stk := e.protocol.stack
 		if stk.HandleLocal() {
-			addressEndpoint := e.AcquireAssignedAddress(header.IPv6(pkt.NetworkHeader().Slice()).SourceAddress(), e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */)
+			addressEndpoint := e.AcquireAssignedAddress(srcAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */)
 			if addressEndpoint != nil {
 				// The source address is one of our own, so we never should have gotten
 				// a packet like this unless HandleLocal is false or our NIC is the
@@ -1197,7 +1200,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 
 	// CheckPrerouting can modify the backing storage of the packet, so refresh
 	// the header.
-	h = header.IPv6(pkt.NetworkHeader().Slice())
+	h := header.IPv6(pkt.NetworkHeader().Slice())
 	e.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
 }
 
@@ -1220,7 +1223,7 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 	defer hView.Release()
 	h := header.IPv6(hView.AsSlice())
 
-	if !checkV4Mapped(h, stats) {
+	if !checkV4Mapped(h.SourceAddress(), h.DestinationAddress(), stats) {
 		return
 	}
 
@@ -1454,6 +1457,20 @@ func (e *endpoint) deliverPacketLocally(h header.IPv6, pkt *stack.PacketBuffer, 
 		}
 	}
 
+	if len(h) == header.IPv6MinimumSize {
+		switch proto := h.TransportProtocol(); proto {
+		case header.TCPProtocolNumber, header.UDPProtocolNumber, header.ICMPv6ProtocolNumber:
+			// The iterator would return the transport header and data as one
+			// raw payload, leaving no bytes to trim. Keep delivery isolated
+			// on a packet clone, but avoid the iterator's additional views
+			// and the writable header lookups that would copy their chunks.
+			processingPkt := pkt.Clone()
+			defer processingPkt.DecRef()
+			_ = e.deliverTransportPacket(processingPkt, proto, nil, 0, false /* hasFragmentHeader */)
+			return
+		}
+	}
+
 	// Any returned error is only useful for terminating execution early, but
 	// we have nothing left to do, so we can drop it.
 	_ = e.processExtensionHeaders(h, pkt, false /* forwarding */)
@@ -1522,7 +1539,7 @@ func (e *endpoint) processExtensionHeader(it *header.IPv6PayloadIterator, pkt **
 			return true, err
 		}
 	case header.IPv6RawPayloadHeader:
-		if err := e.processIPv6RawPayloadHeader(&extHdr, it, *pkt, *routerAlert, previousHeaderStart, *hasFragmentHeader); err != nil {
+		if err := e.processIPv6RawPayloadHeader(&extHdr, *pkt, *routerAlert, previousHeaderStart, *hasFragmentHeader); err != nil {
 			return true, err
 		}
 	case header.IPv6ExperimentExtHdr:
@@ -1576,7 +1593,7 @@ func (e *endpoint) processExtensionHeaders(h header.IPv6, pkt *stack.PacketBuffe
 	}
 }
 
-func (e *endpoint) processIPv6RawPayloadHeader(extHdr *header.IPv6RawPayloadHeader, it *header.IPv6PayloadIterator, pkt *stack.PacketBuffer, routerAlert *header.IPv6RouterAlertOption, previousHeaderStart uint32, hasFragmentHeader bool) error {
+func (e *endpoint) processIPv6RawPayloadHeader(extHdr *header.IPv6RawPayloadHeader, pkt *stack.PacketBuffer, routerAlert *header.IPv6RouterAlertOption, previousHeaderStart uint32, hasFragmentHeader bool) error {
 	stats := e.stats.ip
 	// If the last header in the payload isn't a known IPv6 extension header,
 	// handle it as if it is transport layer data.å
@@ -1598,13 +1615,17 @@ func (e *endpoint) processIPv6RawPayloadHeader(extHdr *header.IPv6RawPayloadHead
 		return fmt.Errorf("could not consume %d bytes", trim)
 	}
 
-	proto := tcpip.TransportProtocolNumber(extHdr.Identifier)
+	return e.deliverTransportPacket(pkt, tcpip.TransportProtocolNumber(extHdr.Identifier), routerAlert, previousHeaderStart, hasFragmentHeader)
+}
+
+func (e *endpoint) deliverTransportPacket(pkt *stack.PacketBuffer, proto tcpip.TransportProtocolNumber, routerAlert *header.IPv6RouterAlertOption, previousHeaderStart uint32, hasFragmentHeader bool) error {
 	// If the packet was reassembled from a fragment, it will not have a
 	// transport header set yet.
 	if len(pkt.TransportHeader().Slice()) == 0 {
 		e.protocol.parseTransport(pkt, proto)
 	}
 
+	stats := e.stats.ip
 	stats.PacketsDelivered.Increment()
 	if proto == header.ICMPv6ProtocolNumber {
 		e.handleICMP(pkt, hasFragmentHeader, routerAlert)
@@ -2917,14 +2938,14 @@ func buildNextFragment(pf *fragmentation.PacketFragmenter, originalIPHeaders hea
 	return fragPkt, more
 }
 
-func checkV4Mapped(h header.IPv6, stats ip.MultiCounterIPStats) bool {
+func checkV4Mapped(srcAddr, dstAddr tcpip.Address, stats ip.MultiCounterIPStats) bool {
 	// Disallow IPv4-mapped addresses per RFC 6890 section 2.2.3.
 	ret := true
-	if header.IsV4MappedAddress(h.SourceAddress()) {
+	if header.IsV4MappedAddress(srcAddr) {
 		stats.InvalidSourceAddressesReceived.Increment()
 		ret = false
 	}
-	if header.IsV4MappedAddress(h.DestinationAddress()) {
+	if header.IsV4MappedAddress(dstAddr) {
 		stats.InvalidDestinationAddressesReceived.Increment()
 		ret = false
 	}

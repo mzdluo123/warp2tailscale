@@ -9,8 +9,9 @@ type netstack_PacketBuffer struct {
 	GSOOptions netstack_GSO
 }
 
-func (*netstack_PacketBuffer) DecRef()   { panic("unreachable") }
-func (*netstack_PacketBuffer) Size() int { panic("unreachable") }
+func (*netstack_PacketBuffer) DecRef()                      { panic("unreachable") }
+func (*netstack_PacketBuffer) Size() int                    { panic("unreachable") }
+func (*netstack_PacketBuffer) CopyNetworkPacket([]byte) int { panic("unreachable") }
 
 type netstack_GSOType int
 
@@ -67,3 +68,4 @@ func (s slicer) Slice() []byte { panic("unreachable") }
 type netstack_Buffer struct{}
 
 func (netstack_Buffer) Flatten() []byte { panic("unreachable") }
+func (netstack_Buffer) Release()        { panic("unreachable") }

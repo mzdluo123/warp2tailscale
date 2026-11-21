@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/Diniboy1123/usque v1.5.0
+	github.com/quic-go/quic-go v0.59.0
 	golang.org/x/net v0.55.0
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.100.0
@@ -34,7 +35,6 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/pires/go-proxyproto v0.8.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
@@ -66,6 +66,8 @@ replace tailscale.com => ./third_party/tailscale
 replace gvisor.dev/gvisor => ./third_party/gvisor
 
 replace github.com/Diniboy1123/usque => ./third_party/usque
+
+replace github.com/Diniboy1123/connect-ip-go => ./third_party/connect-ip-go
 
 replace golang.zx2c4.com/wireguard => ./third_party/wireguard
 

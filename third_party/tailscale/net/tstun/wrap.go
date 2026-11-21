@@ -381,6 +381,13 @@ func (t *Wrapper) Close() error {
 		t.outboundClosed = true
 		close(t.vectorOutbound)
 		t.outboundMu.Unlock()
+		// The WireGuard reader may already have stopped. Release any queued
+		// packet that it did not take from us.
+		for r := range t.vectorOutbound {
+			if r.injected.packet != nil {
+				r.injected.packet.DecRef()
+			}
+		}
 		err = t.tdev.Close()
 		t.eventClient.Close()
 		if t.tunDevStatsCloser != nil {
@@ -520,14 +527,18 @@ func (t *Wrapper) sendBufferConsumed() {
 
 // injectOutbound does t.vectorOutbound <- r
 func (t *Wrapper) injectOutbound(r tunInjectedRead) {
+	queued := false
 	t.outboundMu.Lock()
-	defer t.outboundMu.Unlock()
-	if t.outboundClosed {
-		return
+	if !t.outboundClosed {
+		select {
+		case t.vectorOutbound <- tunVectorReadResult{injected: r}:
+			queued = true
+		case <-t.closed:
+		}
 	}
-	select {
-	case t.vectorOutbound <- tunVectorReadResult{injected: r}:
-	case <-t.closed:
+	t.outboundMu.Unlock()
+	if !queued && r.packet != nil {
+		r.packet.DecRef()
 	}
 }
 
@@ -1107,9 +1118,7 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 		if !buildfeatures.HasNetstack {
 			panic("unreachable")
 		}
-		bufN := copy(pkt, res.packet.NetworkHeader().Slice())
-		bufN += copy(pkt[bufN:], res.packet.TransportHeader().Slice())
-		bufN += copy(pkt[bufN:], res.packet.Data().AsRange().ToSlice())
+		bufN := res.packet.CopyNetworkPacket(pkt)
 		gso = res.packet.GSOOptions
 		pkt = pkt[:bufN]
 		defer res.packet.DecRef() // defer DecRef so we may continue to reference it
@@ -1526,6 +1535,7 @@ func (t *Wrapper) InjectOutboundPacketBuffer(pkt *netstack_PacketBuffer) error {
 	if capt := t.captureHook.Load(); capt != nil {
 		b := pkt.ToBuffer()
 		capt(packet.SynthesizedToPeer, t.now(), b.Flatten(), packet.CaptureMeta{})
+		b.Release()
 	}
 
 	t.injectOutbound(tunInjectedRead{packet: pkt})

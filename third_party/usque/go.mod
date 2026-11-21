@@ -36,3 +36,5 @@ replace golang.zx2c4.com/wireguard => ../wireguard
 replace gvisor.dev/gvisor => ../gvisor
 
 replace github.com/quic-go/quic-go => ../quic-go
+
+replace github.com/Diniboy1123/connect-ip-go => ../connect-ip-go

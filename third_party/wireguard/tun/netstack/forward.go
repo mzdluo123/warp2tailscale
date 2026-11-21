@@ -16,7 +16,9 @@ import (
 // The existing TUN remains the WAN, and owns the WARP-assigned addresses.
 type Forwarder struct{ client *channel.Endpoint }
 
-func (n *Net) EnableForwarding(ctx context.Context, prefixes []netip.Prefix, deliver func([]byte) error) (*Forwarder, error) {
+// EnableForwarding delivers routed replies by transferring one packet reference
+// to deliver, which must release it even if delivery fails.
+func (n *Net) EnableForwarding(ctx context.Context, prefixes []netip.Prefix, deliver func(*stack.PacketBuffer) error) (*Forwarder, error) {
 	const clientNIC = 2
 	client := channel.New(128, uint32(n.mtu), "")
 	if err := n.stack.CreateNIC(clientNIC, client); err != nil {
@@ -58,13 +60,11 @@ func (n *Net) EnableForwarding(ctx context.Context, prefixes []netip.Prefix, del
 			if pkt == nil {
 				return
 			}
-			data := make([]byte, pkt.Size())
-			copyPacket(data, pkt)
-			pkt.DecRef()
 			if ctx.Err() != nil {
+				pkt.DecRef()
 				return
 			}
-			_ = deliver(data)
+			_ = deliver(pkt)
 		}
 	}()
 	return &Forwarder{client}, nil

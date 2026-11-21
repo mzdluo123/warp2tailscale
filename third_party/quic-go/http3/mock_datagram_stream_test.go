@@ -306,40 +306,40 @@ func (c *MockDatagramStreamReceiveDatagramCall) DoAndReturn(f func(context.Conte
 	return c
 }
 
-// SendDatagram mocks base method.
-func (m *MockDatagramStream) SendDatagram(b []byte) error {
+// SendDatagramWithPrefix mocks base method.
+func (m *MockDatagramStream) SendDatagramWithPrefix(prefix, b []byte) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendDatagram", b)
+	ret := m.ctrl.Call(m, "SendDatagramWithPrefix", prefix, b)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// SendDatagram indicates an expected call of SendDatagram.
-func (mr *MockDatagramStreamMockRecorder) SendDatagram(b any) *MockDatagramStreamSendDatagramCall {
+// SendDatagramWithPrefix indicates an expected call of SendDatagramWithPrefix.
+func (mr *MockDatagramStreamMockRecorder) SendDatagramWithPrefix(prefix, b any) *MockDatagramStreamSendDatagramWithPrefixCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDatagram", reflect.TypeOf((*MockDatagramStream)(nil).SendDatagram), b)
-	return &MockDatagramStreamSendDatagramCall{Call: call}
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDatagramWithPrefix", reflect.TypeOf((*MockDatagramStream)(nil).SendDatagramWithPrefix), prefix, b)
+	return &MockDatagramStreamSendDatagramWithPrefixCall{Call: call}
 }
 
-// MockDatagramStreamSendDatagramCall wrap *gomock.Call
-type MockDatagramStreamSendDatagramCall struct {
+// MockDatagramStreamSendDatagramWithPrefixCall wrap *gomock.Call
+type MockDatagramStreamSendDatagramWithPrefixCall struct {
 	*gomock.Call
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockDatagramStreamSendDatagramCall) Return(arg0 error) *MockDatagramStreamSendDatagramCall {
+func (c *MockDatagramStreamSendDatagramWithPrefixCall) Return(arg0 error) *MockDatagramStreamSendDatagramWithPrefixCall {
 	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockDatagramStreamSendDatagramCall) Do(f func([]byte) error) *MockDatagramStreamSendDatagramCall {
+func (c *MockDatagramStreamSendDatagramWithPrefixCall) Do(f func([]byte, []byte) error) *MockDatagramStreamSendDatagramWithPrefixCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockDatagramStreamSendDatagramCall) DoAndReturn(f func([]byte) error) *MockDatagramStreamSendDatagramCall {
+func (c *MockDatagramStreamSendDatagramWithPrefixCall) DoAndReturn(f func([]byte, []byte) error) *MockDatagramStreamSendDatagramWithPrefixCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

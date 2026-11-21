@@ -30,6 +30,7 @@ tcp:
   receive_buffer_bytes: 4194304
 policy:
   udp: all  # all / dns-only
+  block_quic_443: true  # drop detected QUIC to UDP/443; false allows HTTP/3
   icmp: true
   ipv4: true
   ipv6: true

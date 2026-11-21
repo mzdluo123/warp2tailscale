@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/netip"
 	"os"
 	"runtime"
@@ -431,6 +432,52 @@ func (b *fakeBindSized) SetMark(mark uint32) error                              
 func (b *fakeBindSized) Send(bufs [][]byte, ep conn.Endpoint, offset int) error { return nil }
 func (b *fakeBindSized) ParseEndpoint(s string) (conn.Endpoint, error)          { return nil, nil }
 func (b *fakeBindSized) BatchSize() int                                         { return b.size }
+
+// reportBatchBind records the actual buffer slice passed to each receive loop.
+type reportBatchBind struct {
+	fakeBindSized
+	requested []int
+	observed  []chan int
+}
+
+func (b *reportBatchBind) ReceiveBatchSize(i int) int { return b.requested[i] }
+
+func (b *reportBatchBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
+	fns := make([]conn.ReceiveFunc, len(b.observed))
+	for i, observed := range b.observed {
+		fns[i] = func(bufs [][]byte, _ []int, _ []conn.Endpoint) (int, error) {
+			observed <- len(bufs)
+			return 0, net.ErrClosed
+		}
+	}
+	return fns, port, nil
+}
+
+func TestReceiveLoopBatchSize(t *testing.T) {
+	b := &reportBatchBind{
+		fakeBindSized: fakeBindSized{size: 4},
+		requested:     []int{4, 1, 0, 5},
+		observed:      make([]chan int, 4),
+	}
+	for i := range b.observed {
+		b.observed[i] = make(chan int, 1)
+	}
+	dev := NewDevice(tuntest.NewChannelTUN().TUN(), b, NewLogger(LogLevelSilent, ""))
+	defer dev.Close()
+	if err := dev.Up(); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int{4, 1, 4, 4} {
+		select {
+		case got := <-b.observed[i]:
+			if got != want {
+				t.Errorf("receiver %d: got %d buffers, want %d", i, got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("receiver %d did not start", i)
+		}
+	}
+}
 
 type fakeTUNDeviceSized struct {
 	size int

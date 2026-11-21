@@ -76,3 +76,5 @@ ignore (
 	evidence
 	state
 )
+
+replace github.com/tailscale/wireguard-go => ./third_party/tailscale-wireguard-go

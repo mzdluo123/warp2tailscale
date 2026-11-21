@@ -18,6 +18,8 @@ Tailscale 客户端 ⇄ WireGuard ⇄ tsnet ┬─ TCP 中继 ───┬─ WA
 
 示例配置开启双栈 UDP 和 ICMP。UDP 路由与 TCP 中继共用当前 WARP 会话。公网测试中，HTTP/3、双栈 ping 以及 160 和 1200 字节的 UDP 回显成功。2400 字节的 UDP 回显在同一真实路径上双栈均超时；节点已观察到 IP 重组并向 WARP 发送分片，公网接收端抓包未看到分片。内存网络中的双栈大数据报往返测试通过。IPv6 含多重扩展头的报文沿用 Tailscale 内层解析器的限制。IPv6 邻居发现等链路本地控制报文只在所属链路内生效。
 
+Linux 上的 WireGuard 为 IPv4 和 IPv6 直连分别保留批量收包缓冲。DERP 中继每次交付一个包，因此它的接收循环只保留一个缓冲。
+
 WARP 会话断开时，节点关闭该会话中的连接，并拒绝新的出口连接，直到隧道恢复。Tailnet 和 WARP 的外层连接使用宿主机网络。
 
 ## 在 Linux 上运行
@@ -129,4 +131,4 @@ WARP 接收路径使用基于 quic-go v0.59.0 的本地版本。QUIC 接收队�
 
 `bash scripts/test-mvp.sh local` 构建程序并运行 Go 测试。已选中出口且启用 Tailscale DNS 的双栈 Linux 客户端可运行 `bash scripts/test-mvp.sh client`；需要支持 HTTP/3 的 curl、dig 和 ping。它会验证默认解析、双栈 HTTPS、显式 UDP/53、HTTP/3 和公网 echo。测试旧策略时可设置 `EXIT_UDP_POLICY=dns-only EXIT_ICMP=false`。示例中的 `logging.quiet_flows: true` 关闭逐流和 DNS 查询日志，保留节点启动与 WARP 会话状态。需要核对单条连接时，设为 `false` 并重启。按 TCP 四元组核对 BBR 日志与本地 tailscale0 抓包的用法见 `python3 scripts/verify-bbr-flow.py --help`。
 
-本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE)、[usque](third_party/usque/LICENSE.md) 和 [quic-go](third_party/quic-go/LICENSE)。
+本项目包含修改过的上游源码。相应许可证见 [Tailscale](third_party/tailscale/LICENSE)、[gVisor](third_party/gvisor/LICENSE)、[wireguard-go](third_party/wireguard/LICENSE)、[Tailscale 的 wireguard-go 分支](third_party/tailscale-wireguard-go/LICENSE)、[usque](third_party/usque/LICENSE.md) 和 [quic-go](third_party/quic-go/LICENSE)。

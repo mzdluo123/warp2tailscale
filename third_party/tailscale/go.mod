@@ -516,3 +516,5 @@ require (
 tool github.com/stacklok/frizbee
 
 replace gvisor.dev/gvisor => ../gvisor
+
+replace github.com/tailscale/wireguard-go => ../tailscale-wireguard-go

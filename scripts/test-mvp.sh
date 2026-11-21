@@ -17,7 +17,7 @@ case ${1:-local} in
     go test ./...
     (cd third_party/quic-go && go test -run '^Test(ReceivedDatagram(OwnsPayload|RingWrapAndOverflow)|DatagramRingSelection)$' . ./http3)
     go test tailscale.com/net/batching tailscale.com/wgengine/netstack/gro gvisor.dev/gvisor/pkg/buffer gvisor.dev/gvisor/pkg/tcpip/stack
-    go test -run "^TestReceiveBatchBindBuffers$" tailscale.com/wgengine/magicsock
+    go test -run "^TestReceiveBatch(BindBuffers|Size)$" tailscale.com/wgengine/magicsock
     go test -count=1 -run "TestExitTCPShutdown|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
     go test -count=1 -v -run 'TestBBR|TestDisconnect|TestEndpointBufferSelection' github.com/Diniboy1123/usque/bridge gvisor.dev/gvisor/pkg/tcpip/transport/tcp
     ;;

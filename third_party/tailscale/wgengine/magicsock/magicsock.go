@@ -3460,6 +3460,15 @@ func (c *connBind) BatchSize() int {
 	}
 }
 
+// ReceiveBatchSize sizes the packet buffers held by each WireGuard reader.
+// receiveDERP returns at most one packet per call.
+func (c *connBind) ReceiveBatchSize(index int) int {
+	if index == int(health.ReceiveDERP) || runtime.GOOS == "js" {
+		return 1
+	}
+	return c.BatchSize()
+}
+
 // Open is called by WireGuard to create a UDP binding.
 // The ignoredPort comes from wireguard-go, via the wgcfg config.
 // We ignore that port value here, since we have the local port available easily.
@@ -3472,7 +3481,11 @@ func (c *connBind) Open(ignoredPort uint16) ([]conn.ReceiveFunc, uint16, error) 
 		return nil, 0, errors.New("magicsock: connBind already open")
 	}
 	c.closed = false
-	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6(), c.receiveDERP}
+	fns := []conn.ReceiveFunc{
+		health.ReceiveIPv4: c.receiveIPv4(),
+		health.ReceiveIPv6: c.receiveIPv6(),
+		health.ReceiveDERP: c.receiveDERP,
+	}
 	if runtime.GOOS == "js" {
 		fns = []conn.ReceiveFunc{c.receiveDERP}
 	}

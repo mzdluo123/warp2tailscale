@@ -4516,6 +4516,19 @@ func TestSendingTSMPDiscoTimer(t *testing.T) {
 	}
 }
 
+func TestReceiveBatchSize(t *testing.T) {
+	b := new(connBind)
+	var s wgconn.ReceiveBatchSizer = b
+	for _, direct := range []health.ReceiveFunc{health.ReceiveIPv4, health.ReceiveIPv6} {
+		if got := s.ReceiveBatchSize(int(direct)); got != b.BatchSize() {
+			t.Errorf("%v: got %d buffers, want %d", direct, got, b.BatchSize())
+		}
+	}
+	if got := s.ReceiveBatchSize(int(health.ReceiveDERP)); got != 1 {
+		t.Errorf("DERP: got %d buffers, want 1", got)
+	}
+}
+
 func TestReceiveBatchBindBuffers(t *testing.T) {
 	b := receiveBatch{msgs: make([]ipv6.Message, 3)}
 	first := [][]byte{{1}, {2}, {3}}

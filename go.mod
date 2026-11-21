@@ -69,6 +69,8 @@ replace github.com/Diniboy1123/usque => ./third_party/usque
 
 replace golang.zx2c4.com/wireguard => ./third_party/wireguard
 
+replace github.com/quic-go/quic-go => ./third_party/quic-go
+
 ignore (
 	bin
 	evidence

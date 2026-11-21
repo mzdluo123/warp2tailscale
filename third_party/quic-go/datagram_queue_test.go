@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/synctest"
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/wire"
@@ -84,6 +85,24 @@ func TestDatagramQueueReceive(t *testing.T) {
 	data, err = queue.Receive(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []byte("bar"), data)
+}
+
+func TestReceivedDatagramOwnsPayload(t *testing.T) {
+	parser := wire.NewFrameParser(true, false, false)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	packet := []byte("one")
+	for _, payload := range []string{"one", "two"} {
+		copy(packet, payload)
+		frame, _, err := parser.ParseDatagramFrame(0x30, packet, protocol.Version1)
+		require.NoError(t, err)
+		queue.HandleDatagramFrame(frame)
+	}
+	clear(packet)
+	for _, want := range []string{"one", "two"} {
+		got, err := queue.Receive(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, want, string(got))
+	}
 }
 
 func TestDatagramQueueReceiveBlocking(t *testing.T) {
@@ -177,4 +196,23 @@ func TestDatagramQueueClose(t *testing.T) {
 			t.Fatal("should have received an error")
 		}
 	})
+}
+
+func BenchmarkParseEnqueueReceiveDatagram(b *testing.B) {
+	packet := make([]byte, 1200)
+	parser := wire.NewFrameParser(true, false, false)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	ctx := b.Context()
+	b.SetBytes(int64(len(packet)))
+	b.ReportAllocs()
+	for b.Loop() {
+		frame, _, err := parser.ParseDatagramFrame(0x30, packet, protocol.Version1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		queue.HandleDatagramFrame(frame)
+		if _, err := queue.Receive(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

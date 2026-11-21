@@ -15,6 +15,7 @@ case ${1:-local} in
     CGO_ENABLED=0 go build -o bin/warp-smoke ./cmd/warp-smoke
     CGO_ENABLED=0 go build -tags mvptest -o bin/exitnode-test ./cmd/exitnode
     go test ./...
+    (cd third_party/quic-go && go test -run 'TestReceivedDatagram(OwnsPayload|RingWrapAndOverflow)$' . ./http3)
     go test tailscale.com/net/batching tailscale.com/wgengine/netstack/gro gvisor.dev/gvisor/pkg/buffer gvisor.dev/gvisor/pkg/tcpip/stack
     go test -run "^TestReceiveBatchBindBuffers$" tailscale.com/wgengine/magicsock
     go test -count=1 -run "TestExitTCPShutdown|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet

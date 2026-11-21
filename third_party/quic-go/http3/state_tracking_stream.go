@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
 )
 
 const streamDatagramQueueLen = 32
@@ -23,7 +24,7 @@ type stateTrackingStream struct {
 
 	sendDatagram func([]byte) error
 	hasData      chan struct{}
-	queue        [][]byte // TODO: use a ring buffer
+	queue        *ringbuffer.RingBuffer[[]byte] // allocated on the first received datagram
 
 	mx      sync.Mutex
 	sendErr error
@@ -138,19 +139,22 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	if s.recvErr != nil {
 		return
 	}
-	if len(s.queue) >= streamDatagramQueueLen {
+	if s.queue == nil {
+		s.queue = new(ringbuffer.RingBuffer[[]byte])
+		s.queue.Init(streamDatagramQueueLen)
+	}
+	if s.queue.Len() == streamDatagramQueueLen {
 		return
 	}
-	s.queue = append(s.queue, data)
+	s.queue.PushBack(data)
 	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
+	if s.queue != nil && !s.queue.Empty() {
+		data := s.queue.PopFront()
 		s.mx.Unlock()
 		return data, nil
 	}

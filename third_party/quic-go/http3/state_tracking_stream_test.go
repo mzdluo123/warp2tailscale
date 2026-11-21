@@ -317,3 +317,44 @@ func TestDatagramSending(t *testing.T) {
 	str.closeSend(net.ErrClosed)
 	require.ErrorIs(t, str.SendDatagram([]byte("foobar")), net.ErrClosed)
 }
+
+func TestReceivedDatagramRingWrapAndOverflow(t *testing.T) {
+	s := &stateTrackingStream{hasData: make(chan struct{}, 1)}
+	for i := range streamDatagramQueueLen {
+		s.enqueueDatagram([]byte{byte(i)})
+	}
+	// Keep the ring full while both indices repeatedly wrap. The new arrival
+	// at capacity must be dropped without replacing an older datagram.
+	const steps = 3 * streamDatagramQueueLen
+	for i := range steps {
+		s.enqueueDatagram([]byte{255})
+		data, err := s.ReceiveDatagram(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, []byte{byte(i)}, data)
+		s.enqueueDatagram([]byte{byte(i + streamDatagramQueueLen)})
+	}
+	s.closeReceive(io.EOF)
+	for i := range streamDatagramQueueLen {
+		data, err := s.ReceiveDatagram(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, []byte{byte(steps + i)}, data)
+	}
+	_, err := s.ReceiveDatagram(t.Context())
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func BenchmarkStreamDatagramQueue(b *testing.B) {
+	s := &stateTrackingStream{hasData: make(chan struct{}, 1)}
+	payload := make([]byte, 1200)
+	for range streamDatagramQueueLen / 2 {
+		s.enqueueDatagram(payload)
+	}
+	ctx := b.Context()
+	b.ReportAllocs()
+	for b.Loop() {
+		s.enqueueDatagram(payload)
+		if _, err := s.ReceiveDatagram(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

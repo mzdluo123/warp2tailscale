@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -36,7 +37,8 @@ type config struct {
 		QuietFlows bool `yaml:"quiet_flows"`
 	}
 	Runtime struct {
-		MaxProcs int `yaml:"max_procs"`
+		MaxProcs int   `yaml:"max_procs"`
+		UDPGSO   *bool `yaml:"udp_gso"`
 	}
 	TCP struct {
 		Send          int           `yaml:"send_buffer_bytes"`
@@ -126,6 +128,16 @@ func run(ctx context.Context, cfg config) error {
 	}
 	if cfg.Runtime.MaxProcs > 0 {
 		runtime.GOMAXPROCS(cfg.Runtime.MaxProcs)
+	}
+	if cfg.Runtime.UDPGSO != nil {
+		// Both libraries probe each socket and handle unsupported interfaces.
+		// Apply the process setting before either transport opens its sockets.
+		disable := strconv.FormatBool(!*cfg.Runtime.UDPGSO)
+		for _, key := range []string{"TS_DEBUG_DISABLE_UDP_GSO", "QUIC_GO_DISABLE_GSO"} {
+			if err := os.Setenv(key, disable); err != nil {
+				return err
+			}
+		}
 	}
 	traceFlows := !cfg.Logging.QuietFlows
 	s := &tsnet.Server{ExitBBRQuiet: cfg.Logging.QuietFlows, Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}

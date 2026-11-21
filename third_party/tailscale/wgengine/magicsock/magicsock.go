@@ -589,7 +589,6 @@ func newConn(logf logger.Logf) *Conn {
 	c.receiveBatchPool = sync.Pool{New: func() any {
 		msgs := make([]ipv6.Message, c.bind.BatchSize())
 		for i := range msgs {
-			msgs[i].Buffers = make([][]byte, 1)
 			msgs[i].OOB = make([]byte, batching.MinControlMessageSize())
 		}
 		batch := &receiveBatch{
@@ -1689,23 +1688,24 @@ func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, is
 }
 
 type receiveBatch struct {
-	msgs []ipv6.Message
+	msgs  []ipv6.Message
+	buffs [][]byte
 }
 
-func (c *Conn) getReceiveBatchForBuffs(buffs [][]byte) *receiveBatch {
-	batch := c.receiveBatchPool.Get().(*receiveBatch)
+func (batch *receiveBatch) bindBuffers(buffs [][]byte) {
+	if len(buffs) == len(batch.buffs) && (len(buffs) == 0 || &buffs[0] == &batch.buffs[0]) {
+		return
+	}
+	// WireGuard replaces individual packet buffers after each read but normally
+	// reuses the slice of descriptors. Point each message at its descriptor so
+	// the next read sees those replacements without rebuilding the whole batch.
 	for i := range buffs {
-		batch.msgs[i].Buffers[0] = buffs[i]
-		batch.msgs[i].OOB = batch.msgs[i].OOB[:cap(batch.msgs[i].OOB)]
+		batch.msgs[i].Buffers = buffs[i : i+1 : i+1]
 	}
-	return batch
-}
-
-func (c *Conn) putReceiveBatch(batch *receiveBatch) {
-	for i := range batch.msgs {
-		batch.msgs[i] = ipv6.Message{Buffers: batch.msgs[i].Buffers, OOB: batch.msgs[i].OOB}
+	for i := len(buffs); i < len(batch.buffs); i++ {
+		batch.msgs[i].Buffers = nil
 	}
-	c.receiveBatchPool.Put(batch)
+	batch.buffs = buffs
 }
 
 func (c *Conn) receiveIPv4() conn.ReceiveFunc {
@@ -1747,8 +1747,9 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 			panic("nil RebindingUDPConn")
 		}
 
-		batch := c.getReceiveBatchForBuffs(buffs)
-		defer c.putReceiveBatch(batch)
+		batch := c.receiveBatchPool.Get().(*receiveBatch)
+		defer c.receiveBatchPool.Put(batch)
+		batch.bindBuffers(buffs)
 		for {
 			numMsgs, err := ruc.ReadBatch(batch.msgs[:len(buffs)], 0)
 			if err != nil {

@@ -1,9 +1,31 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestUDPGSOConfig(t *testing.T) {
+	for _, tc := range []struct {
+		setting string
+		value   bool
+	}{{"", false}, {"  udp_gso: false\n", false}, {"  udp_gso: true\n", true}} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("runtime:\n  max_procs: 1\n"+tc.setting), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gso := cfg.Runtime.UDPGSO
+		if (gso == nil) != (tc.setting == "") || (gso != nil && *gso != tc.value) {
+			t.Fatalf("unexpected UDP GSO setting for %q", tc.setting)
+		}
+	}
+}
 
 func TestTuningConfiguration(t *testing.T) {
 	cfg, err := load("../../config.example.yaml")

@@ -39,6 +39,7 @@ import (
 	"go4.org/mem"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/disco"
@@ -4512,5 +4513,29 @@ func TestSendingTSMPDiscoTimer(t *testing.T) {
 	conn.maybeSendTSMPDiscoAdvert(ep)
 	if err := eventbustest.ExpectExactly(tw, eventbustest.Type[NewDiscoKeyAvailable]()); err != nil {
 		t.Errorf("expected only one event, got: %s", err)
+	}
+}
+
+func TestReceiveBatchBindBuffers(t *testing.T) {
+	b := receiveBatch{msgs: make([]ipv6.Message, 3)}
+	first := [][]byte{{1}, {2}, {3}}
+	b.bindBuffers(first)
+	first[1] = []byte{4}
+	b.bindBuffers(first)
+	if got := b.msgs[1].Buffers[0][0]; got != 4 {
+		t.Fatalf("replacement buffer = %d", got)
+	}
+	next := [][]byte{{5}, {6}, {7}}
+	b.bindBuffers(next)
+	if got := b.msgs[0].Buffers[0][0]; got != 5 {
+		t.Fatalf("different batch of same length = %d", got)
+	}
+	b.bindBuffers(next[1:])
+	if b.msgs[2].Buffers != nil || b.msgs[0].Buffers[0][0] != 6 {
+		t.Fatal("shorter batch retained stale descriptors")
+	}
+	b.bindBuffers(nil)
+	if b.msgs[0].Buffers != nil || b.msgs[1].Buffers != nil {
+		t.Fatal("empty batch retained caller buffers")
 	}
 }

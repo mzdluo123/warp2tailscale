@@ -79,15 +79,22 @@ type chunk struct {
 }
 
 func newChunk(size int) *chunk {
+	return newChunkWithData(size, nil)
+}
+
+// newChunkWithData initializes the prefix from data and zeros all spare capacity.
+func newChunkWithData(size int, data []byte) *chunk {
 	var c *chunk
 	if size > MaxChunkSize {
 		c = &chunk{
 			data: make([]byte, size),
 		}
+		copy(c.data, data)
 	} else {
 		pool := getChunkPool(size)
 		c = pool.Get().(*chunk)
-		clear(c.data)
+		n := copy(c.data, data)
+		clear(c.data[n:])
 	}
 	c.InitRefs()
 	return c
@@ -107,7 +114,5 @@ func (c *chunk) DecRef() {
 }
 
 func (c *chunk) Clone() *chunk {
-	cpy := newChunk(len(c.data))
-	copy(cpy.data, c.data)
-	return cpy
+	return newChunkWithData(len(c.data), c.data)
 }

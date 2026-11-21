@@ -67,11 +67,12 @@ dig @100.100.100.100 example.com AAAA
 |---|---|---|
 | `congestion.type` | `bbr`、`cubic`、`reno` | `bbr` |
 | `congestion.initial_cwnd_packets` | 4–128 个 MSS，0 使用默认值 | 32 |
-| `congestion.pacing_burst_packets` | 每次发包最多 1–32 个 MSS，0 使用栈默认值 1 | 32 |
-| `congestion.pacing_burst_window` | 0–10 ms，以当前速率限制每一批可提前发送的数据量，0 仅使用包数限制 | 2ms |
-| `congestion.max_pacing_bytes_per_second` | 每条客户端方向 TCP 的 pacing 速率上限，0 由 BBR 估算 | 12000000 |
+| `congestion.pacing_burst_packets` | 每次发包最多 1–32 个 MSS，0 使用栈默认值 1 | 24 |
+| `congestion.pacing_burst_window` | 0–10 ms，以当前速率限制每一批可提前发送的数据量，0 仅使用包数限制 | 1ms |
+| `congestion.max_pacing_bytes_per_second` | 每条客户端方向 TCP 的 pacing 速率上限，0 由 BBR 估算 | 0 |
 | `warp.packet_queue_packets` | WARP 出口队列容量，1–256 包，0 使用默认值 32 | 32 |
-| `runtime.max_procs` | Go 同时执行的逻辑处理器数，0 使用运行时默认值 | 2 |
+| `runtime.max_procs` | Go 同时执行的逻辑处理器数，0 使用运行时默认值 | 1 |
+| `runtime.udp_gso` | `true` 允许 WireGuard 和 MASQUE 使用 UDP GSO，`false` 在本进程禁用。省略时沿用两个库的环境设置。重启后生效。 | `true` |
 | `tcp.send_buffer_bytes` | 4096–67108864 字节，0 使用栈默认值 | 8388608（8 MiB） |
 | `tcp.receive_buffer_bytes` | 同上 | 4194304（4 MiB） |
 
@@ -84,9 +85,31 @@ dig @100.100.100.100 example.com AAAA
 | 32 MSS / 2 ms / 12 MB/s / 2 | 4.97 | 175 ms | 178 ms | 65.62 |
 | 16 MSS / 2 ms / 24 MB/s / 自动 | 4.90 | 217 ms | 228 ms | 71.00 |
 
-示例选择 32 MSS、2 ms 的时间限制、每秒 1200 万字节的单流速率上限和 32 包的 WARP 队列。该配置用于限制突发发送和排队。表内各轮在下载开始、结束时均确认 Tailscale 直连。不同轮次可能走不同的 IPv4 或 IPv6 公网端点，空闲 RTT 也随之变化。CPU 统计包含服务同时处理的其他流量，表中差异不能全归因于配置。另一次非稳定路径测试中，下载期间的 RTT P95 达到 1001 ms。最后部署的配置也遇到过持续 120 秒的下载超时，当次只收到约 4 MB，采到的 250 个 ping 中丢失 46.4%。这些测试没有注入丢包。
+上表中 Go 并行度为 2 的测试使用 32 MSS、2 ms 的突发上限和 32 包的 WARP 队列。表内各轮在下载开始、结束时均确认 Tailscale 直连。不同轮次可能走不同的 IPv4 或 IPv6 公网端点，空闲 RTT 也随之变化。CPU 统计包含服务同时处理的其他流量，表中差异不能全归因于配置。另一次非稳定路径测试中，下载期间的 RTT P95 达到 1001 ms。当时选用的配置也遇到过持续 120 秒的下载超时，当次只收到约 4 MB，采到的 250 个 ping 中丢失 46.4%。这些测试没有注入丢包。
 
 ## 验证
+
+### 单核吞吐和延迟
+
+要给整个出口进程分配一个逻辑 CPU，可在 systemd 服务的 `[Service]` 中设置 `CPUAffinity=1`，并将 YAML 的 `runtime.max_procs` 设为 `1`。将 CPU 编号换成该主机可用的编号。前者约束所有线程，后者控制 Go 的执行并行度。
+
+在支持 x86-64-v4 的 Linux amd64 主机上，可用以下命令构建针对该指令集的出口程序。通用构建命令见上文。
+
+```sh
+CGO_ENABLED=0 GOAMD64=v4 go build -trimpath -o bin/exitnode ./cmd/exitnode
+```
+
+下面的测试在一个逻辑 CPU 上运行两个 tsnet 端点，传输 512 MiB，同时通过第二条 TCP 连接测量小请求的往返时间。输出包括应用吞吐、CPU 时间、空闲和负载下的 RTT P95。它只测 Tailscale 段。测完整出口时，另从独立客户端经 WARP 做不限速 HTTPS 下载，同时测到出口和公网地址的 RTT，并记录直连端点是否切换。
+
+```sh
+CGO_ENABLED=0 GOAMD64=v4 go test -tags exitbench -c -o bin/exitbench tailscale.com/tsnet
+GOMAXPROCS=1 TS_NO_LOGS_NO_SUPPORT=true taskset -c 1 bin/exitbench \
+  -test.cpu=1 -test.run '^TestExitSingleCoreTransfer$' -test.v
+```
+
+s2 上启用 `runtime.udp_gso` 后，WireGuard 实际将多个数据报交给 Linux 做软件分段。一个直连端点保持稳定的测试时段内，单流三轮下载的中位数为 13.60 MB/s，16 流为 28.63 MB/s；空闲 RTT 为 177 ms，下载时的 RTT P95 分别为 178 和 179 ms。另一个时段在 24 流下出现过明显的延迟波动。详细的上传、下载系统调用及队列测量见[单核验收记录](docs/single-core.md)。
+
+### 包处理和协议检查
 
 可用下列命令测量 TCP 校验和验证、接收缓冲区复制和应用读取这段路径的耗时与堆分配。
 

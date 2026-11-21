@@ -337,8 +337,7 @@ func (pk *PacketBuffer) push(typ headerType, size int) []byte {
 	pk.pushed += size
 	h.offset = -pk.pushed
 	h.length = size
-	view := pk.headerView(typ)
-	return view.AsSlice()
+	return pk.headerSlice(typ)
 }
 
 func (pk *PacketBuffer) consume(typ headerType, size int) (v []byte, consumed bool) {
@@ -352,8 +351,19 @@ func (pk *PacketBuffer) consume(typ headerType, size int) (v []byte, consumed bo
 	h.offset = pk.consumed
 	h.length = size
 	pk.consumed += size
-	view := pk.headerView(typ)
-	return view.AsSlice(), true
+	return pk.headerSlice(typ), true
+}
+
+func (pk *PacketBuffer) headerSlice(typ headerType) []byte {
+	h := &pk.headers[typ]
+	if h.length == 0 {
+		return nil
+	}
+	data, ok := pk.buf.PullUpSlice(pk.headerOffsetOf(typ), h.length)
+	if !ok {
+		panic("PullUp failed")
+	}
+	return data
 }
 
 func (pk *PacketBuffer) headerView(typ headerType) buffer.View {
@@ -503,8 +513,7 @@ func (h PacketHeader) View() *buffer.View {
 // should not be modified if the underlying packet could be shared, cloned, or
 // borrowed.
 func (h PacketHeader) Slice() []byte {
-	view := h.pk.headerView(h.typ)
-	return view.AsSlice()
+	return h.pk.headerSlice(h.typ)
 }
 
 // Push pushes size bytes in the front of its residing packet, and returns the
@@ -535,8 +544,7 @@ type PacketData struct {
 // returned slice if they have singular ownership over the underlying
 // Buffer.
 func (d PacketData) PullUp(size int) (b []byte, ok bool) {
-	view, ok := d.pk.buf.PullUp(d.pk.dataOffset(), size)
-	return view.AsSlice(), ok
+	return d.pk.buf.PullUpSlice(d.pk.dataOffset(), size)
 }
 
 // Consume is the same as PullUp except that is additionally consumes the

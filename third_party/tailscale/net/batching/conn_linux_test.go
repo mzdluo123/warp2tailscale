@@ -793,3 +793,26 @@ func TestSendBatchReset(t *testing.T) {
 		t.Fatal("reset touched a message outside the submitted batch")
 	}
 }
+
+// oneDatagramReader leaves the unused message slots untouched, as recvmmsg does.
+type oneDatagramReader struct{ fakeBatchWriter }
+
+func (*oneDatagramReader) ReadBatch(msgs []ipv6.Message, _ int) (int, error) {
+	msgs[0].N = 1
+	msgs[0].NN = 0
+	msgs[0].Buffers[0][0] = 42
+	return 1, nil
+}
+
+func TestGROReadIgnoresUnusedTail(t *testing.T) {
+	c := linuxBatchingConn{xpc: &oneDatagramReader{}, rxOffload: true}
+	msgs := make([]ipv6.Message, 4)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, 1)}
+		msgs[i].N = 1
+	}
+	n, err := c.ReadBatch(msgs, 0)
+	if err != nil || n != 1 || msgs[0].Buffers[0][0] != 42 {
+		t.Fatalf("ReadBatch = %d, %v, first byte %d", n, err, msgs[0].Buffers[0][0])
+	}
+}

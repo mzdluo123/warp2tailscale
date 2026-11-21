@@ -474,7 +474,9 @@ func (c *linuxBatchingConn) ReadBatch(msgs []ipv6.Message, flags int) (n int, er
 		return 0, err
 	}
 	c.handleRXQOverflowCounter(msgs[readAt:], n, err)
-	return c.splitCoalescedMessages(msgs, readAt)
+	// Only these n tail messages were overwritten by recvmmsg. Later slots
+	// may still describe datagrams from a previous read.
+	return c.splitCoalescedMessages(msgs[:readAt+n], readAt)
 }
 
 func (c *linuxBatchingConn) LocalAddr() net.Addr {

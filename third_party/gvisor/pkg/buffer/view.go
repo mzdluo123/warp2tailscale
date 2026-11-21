@@ -76,10 +76,9 @@ func NewViewSize(size int) *View {
 // When in doubt use NewWithView to maximize chunk reuse in production
 // environments.
 func NewViewWithData(data []byte) *View {
-	c := newChunk(len(data))
+	c := newChunkWithData(len(data), data)
 	v := viewPool.Get().(*View)
-	*v = View{chunk: c}
-	v.Write(data)
+	*v = View{chunk: c, write: len(data)}
 	return v
 }
 

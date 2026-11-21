@@ -41,13 +41,10 @@ func (b *Buffer) removeView(v *View) {
 // should be used with caution to avoid unnecessary []byte allocations. When in
 // doubt use NewWithView to maximize chunk reuse.
 func MakeWithData(b []byte) Buffer {
-	buf := Buffer{}
 	if len(b) == 0 {
-		return buf
+		return Buffer{}
 	}
-	v := NewViewWithData(b)
-	buf.Append(v)
-	return buf
+	return MakeWithView(NewViewWithData(b))
 }
 
 // MakeWithView creates a new Buffer initialized with given view. This function
@@ -373,6 +370,18 @@ func (b *Buffer) PullUp(offset, length int) (View, bool) {
 		chunk: merged.chunk,
 	}
 	return pulled, true
+}
+
+// PullUpSlice returns the same writable bytes as PullUp. Packet headers
+// usually fit entirely in the first unshared view.
+func (b *Buffer) PullUpSlice(offset, length int) ([]byte, bool) {
+	v := b.data.Front()
+	if length > 0 && offset >= 0 && v != nil && offset <= v.Size()-length && !v.sharesChunk() {
+		start := v.read + offset
+		return v.chunk.data[start : start+length], true
+	}
+	view, ok := b.PullUp(offset, length)
+	return view.AsSlice(), ok
 }
 
 // Flatten returns a flattened copy of this data.

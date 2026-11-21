@@ -1,7 +1,8 @@
 logging:
   quiet_flows: true  # skip per-flow TCP, UDP, DNS and BBR diagnostics
 runtime:
-  max_procs: 2  # 0 follows the Go runtime / container CPU limit
+  max_procs: 1  # Go execution parallelism; 0 follows the runtime / container limit
+  udp_gso: true  # allow UDP segmentation on WireGuard and MASQUE sockets
 tailscale:
   port: 0  # UDP listen port, 0 selects automatically
   hostname: warp-bbr-exit-mvp
@@ -17,9 +18,9 @@ congestion:
   type: bbr  # bbr / cubic / reno
   bbrProfile: standard
   initial_cwnd_packets: 32
-  pacing_burst_packets: 32
-  pacing_burst_window: 2ms  # optional time cap in addition to the packet cap
-  max_pacing_bytes_per_second: 12000000  # per TCP sender; 0 uses BBR estimation
+  pacing_burst_packets: 24
+  pacing_burst_window: 1ms  # optional time cap in addition to the packet cap
+  max_pacing_bytes_per_second: 0  # per TCP sender; 0 uses BBR estimation
 tcp:
   shutdown_grace_period: 2s
   # Per TCP endpoint, in bytes, on both the Tailscale and WARP stacks.

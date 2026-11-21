@@ -21,9 +21,14 @@ func Buffers(client, upstream net.Conn, src, dst netip.AddrPort) {
 	type sizes interface{ TCPBufferSizes() (int64, int64) }
 	a, aok := client.(sizes)
 	b, bok := upstream.(sizes)
-	if aok && bok {
-		as, ar := a.TCPBufferSizes()
+	if !aok {
+		return
+	}
+	as, ar := a.TCPBufferSizes()
+	if bok {
 		bs, br := b.TCPBufferSizes()
 		log.Printf("TCP %s -> %s client_send=%d client_receive=%d warp_send=%d warp_receive=%d", src, dst, as, ar, bs, br)
+		return
 	}
+	log.Printf("TCP %s -> %s client_send=%d client_receive=%d", src, dst, as, ar)
 }

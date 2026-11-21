@@ -11,7 +11,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// PeerDNS sends a complete wire query over a dedicated WARP TCP connection.
+// PeerDNS sends a complete wire query over a dedicated TCP connection through the selected egress.
 // TCP preserves full DNSSEC and EDNS answers for the client's DoH transport.
 func PeerDNS(ctx context.Context, q []byte, dial func(context.Context, netip.AddrPort) (net.Conn, error)) ([]byte, error) {
 	if len(q) < 12 || len(q) > 65535 || binary.BigEndian.Uint16(q[4:6]) != 1 {

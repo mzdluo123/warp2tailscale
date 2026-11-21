@@ -8,6 +8,27 @@ cd "$(dirname "$0")/.."
 client() {
   if [[ -n ${CLIENT_NS:-} ]]; then sudo ip netns exec "$CLIENT_NS" "$@"; else "$@"; fi
 }
+egress=${EXIT_EGRESS:-warp}
+case $egress in
+  warp|direct) ;;
+  *) echo "unsupported EXIT_EGRESS: $egress" >&2; exit 2 ;;
+esac
+
+check_trace() {
+  local trace=$1 family=${2:-} expected
+  if [[ $egress == warp ]]; then
+    grep -Eq '^warp=(on|plus)$' <<<"$trace"
+    return
+  fi
+  grep -qx 'warp=off' <<<"$trace"
+  case $family in
+    4) expected=${EXIT_DIRECT_IPV4:?set to the host's IPv4 egress address} ;;
+    6) expected=${EXIT_DIRECT_IPV6:?set to the host's IPv6 egress address} ;;
+    *) return 0 ;;
+  esac
+  grep -Fxq "ip=$expected" <<<"$trace"
+}
+
 case ${1:-local} in
   local)
     mkdir -p bin
@@ -18,7 +39,7 @@ case ${1:-local} in
     (cd third_party/quic-go && go test -run '^Test(ReceivedDatagram(OwnsPayload|RingWrapAndOverflow)|DatagramRingSelection)$' . ./http3)
     go test tailscale.com/net/batching tailscale.com/wgengine/netstack/gro gvisor.dev/gvisor/pkg/buffer gvisor.dev/gvisor/pkg/tcpip/stack
     go test -run "^TestReceiveBatchBindBuffers$" tailscale.com/wgengine/magicsock
-    go test -count=1 -run "TestExitTCPShutdown|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
+    go test -count=1 -run "TestExitTCP(Shutdown|DrainsAfterHalfClose)|TestFallback(TCPHandler|UDPPriority)|TestUDPConn|TestDialUDP" tailscale.com/tsnet
     go test -count=1 -v -run 'TestBBR|TestDisconnect|TestEndpointBufferSelection' github.com/Diniboy1123/usque/bridge gvisor.dev/gvisor/pkg/tcpip/transport/tcp
     ;;
   smoke)
@@ -28,7 +49,7 @@ case ${1:-local} in
   client)
     # Exercise the name resolution used by applications before pinning any IP.
     trace=$(client curl -q --noproxy '*' --max-time 20 -fsS https://www.cloudflare.com/cdn-cgi/trace)
-    grep -Eq '^warp=(on|plus)$' <<<"$trace"
+    check_trace "$trace"
     for kind in A AAAA; do
       answer=$(client dig +time=5 +tries=2 +noall +answer @100.100.100.100 example.com "$kind")
       grep -E "[[:space:]]$kind[[:space:]]" <<<"$answer"
@@ -40,12 +61,12 @@ case ${1:-local} in
       if [[ $fam == 6 ]]; then addr='[2606:4700::6810:7b60]'; resolver=2606:4700:4700::1111; type=AAAA; fi
       trace=$(client curl --noproxy '*' --retry 2 --max-time 25 "-$fam" --resolve "www.cloudflare.com:443:$addr" -fsS https://www.cloudflare.com/cdn-cgi/trace)
       grep -E '^(ip|warp)=' <<<"$trace"
-      grep -Eq '^warp=(on|plus)$' <<<"$trace"
+      check_trace "$trace" "$fam"
       answer=$(client dig +time=5 +tries=3 +noall +answer "@$resolver" example.com "$type")
       grep -E "[[:space:]]$type[[:space:]]" <<<"$answer"
       if [[ ${EXIT_UDP_POLICY:-all} == all ]]; then
         quic=$(client curl -q --http3-only --noproxy '*' --max-time 20 "-$fam" --resolve "www.cloudflare.com:443:$addr" -fsS https://www.cloudflare.com/cdn-cgi/trace -w 'http=%{http_version}\n')
-        grep -Eq '^warp=(on|plus)$' <<<"$quic"
+        check_trace "$quic" "$fam"
         grep -Fx 'http=3' <<<"$quic"
       fi
       if [[ ${EXIT_ICMP:-true} == true ]]; then
@@ -70,14 +91,19 @@ case ${1:-local} in
     echo "$row"
     ;;
   capture-check)
-    : "${CAPTURE:?host eth0 pcap}" "${MASQUE_IP:?configured IPv4 outer endpoint}"
-    # The capture must cover both the application destinations and the outer flow.
-    outer=$(tcpdump -nnqr "$CAPTURE" "host $MASQUE_IP and udp port 443" | wc -l)
+    : "${CAPTURE:?host uplink pcap}"
     targets='dst host 104.16.123.96 or dst host 2606:4700::6810:7b60 or dst host 1.1.1.1 or dst host 2606:4700:4700::1111 or dst host 8.8.8.8 or dst host 9.9.9.9'
     if [[ -n ${BENCH_IP:-} ]]; then targets="$targets or dst host $BENCH_IP"; fi
     direct=$(tcpdump -nnqr "$CAPTURE" "$targets" | wc -l)
-    echo "outer_packets=$outer direct_target_packets=$direct"
-    [[ $outer -gt 0 && $direct -eq 0 ]]
+    if [[ $egress == direct ]]; then
+      echo "direct_target_packets=$direct"
+      [[ $direct -gt 0 ]]
+    else
+      : "${MASQUE_IP:?configured IPv4 outer endpoint}"
+      outer=$(tcpdump -nnqr "$CAPTURE" "host $MASQUE_IP and udp port 443" | wc -l)
+      echo "outer_packets=$outer direct_target_packets=$direct"
+      [[ $outer -gt 0 && $direct -eq 0 ]]
+    fi
     ;;
   *) echo "usage: $0 {local|smoke|client|download|capture-check}" >&2; exit 2;;
 esac

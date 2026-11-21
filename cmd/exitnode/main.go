@@ -7,32 +7,28 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
-	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
 	"strconv"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/Diniboy1123/usque/bridge"
 	"gopkg.in/yaml.v3"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipfragment"
 	"tailscale.com/ipn"
-	"tailscale.com/net/packet"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tsnet"
-	"tailscale.com/types/ipproto"
-	"tailscale.com/types/nettype"
+)
 
-	"warp2tailscale/internal/exit"
-	"warp2tailscale/internal/metrics"
-	"warp2tailscale/internal/policy"
+const (
+	egressWarp   = "warp"
+	egressDirect = "direct"
 )
 
 type config struct {
+	Egress struct {
+		Mode string
+	}
 	Logging struct {
 		QuietFlows bool `yaml:"quiet_flows"`
 	}
@@ -91,12 +87,29 @@ func load(path string) (config, error) {
 	}
 	return cfg, nil
 }
+func (cfg config) egressMode() string {
+	if cfg.Egress.Mode == "" {
+		return egressWarp
+	}
+	return cfg.Egress.Mode
+}
+
 func (cfg config) validate() error {
+	switch cfg.egressMode() {
+	case egressWarp:
+		if cfg.Warp.ConfigPath == "" || cfg.Warp.Transport != "masque-h3" || cfg.Warp.MTU != 1280 || cfg.Warp.ReconnectDelay != time.Second || !cfg.Warp.FailClosed {
+			return errors.New("unsupported WARP configuration; see config.example.yaml")
+		}
+		if cfg.Warp.PacketQueue < 0 || cfg.Warp.PacketQueue > 256 {
+			return errors.New("WARP packet queue must be 0..256")
+		}
+	case egressDirect:
+	default:
+		return fmt.Errorf("unsupported egress.mode %q (expected warp or direct)", cfg.Egress.Mode)
+	}
+
 	if cfg.TCP.ShutdownGrace < 0 {
 		return errors.New("tcp.shutdown_grace_period must be nonnegative")
-	}
-	if cfg.Warp.PacketQueue < 0 || cfg.Warp.PacketQueue > 256 {
-		return errors.New("WARP packet queue must be 0..256")
 	}
 	if cfg.Runtime.MaxProcs < 0 {
 		return errors.New("runtime.max_procs must be nonnegative")
@@ -118,7 +131,7 @@ func (cfg config) validate() error {
 			return fmt.Errorf("TCP buffer must be 0 or 4096..67108864 bytes (got %d)", size)
 		}
 	}
-	if cfg.Tailscale.Hostname == "" || cfg.Tailscale.StateDir == "" || cfg.Warp.ConfigPath == "" || cfg.Warp.Transport != "masque-h3" || cfg.Warp.MTU != 1280 || cfg.Warp.ReconnectDelay != time.Second || !cfg.Warp.FailClosed || (cfg.Policy.UDP != "dns-only" && cfg.Policy.UDP != "all") || !cfg.Policy.IPv4 || !cfg.Policy.IPv6 || cfg.Congestion.Profile != "standard" || cfg.Congestion.Type != "bbr" && cfg.Congestion.Type != "cubic" && cfg.Congestion.Type != "reno" {
+	if cfg.Tailscale.Hostname == "" || cfg.Tailscale.StateDir == "" || (cfg.Policy.UDP != "dns-only" && cfg.Policy.UDP != "all") || !cfg.Policy.IPv4 || !cfg.Policy.IPv6 || cfg.Congestion.Profile != "standard" || cfg.Congestion.Type != "bbr" && cfg.Congestion.Type != "cubic" && cfg.Congestion.Type != "reno" {
 		return errors.New("unsupported configuration; see config.example.yaml")
 	}
 	return nil
@@ -140,93 +153,19 @@ func run(ctx context.Context, cfg config) error {
 			}
 		}
 	}
-	if err := os.Setenv("QUIC_GO_HTTP3_DATAGRAM_RING", strconv.FormatBool(cfg.Warp.HTTP3ReceiveRing)); err != nil {
-		return err
-	}
-	traceFlows := !cfg.Logging.QuietFlows
 	s := &tsnet.Server{ExitBBRQuiet: cfg.Logging.QuietFlows, Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
 	up := make(chan struct{})
-	clientRoutes := func(ctx context.Context) ([]netip.Prefix, error) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-up:
-		}
-		v4, v6 := s.TailscaleIPs()
-		var routes []netip.Prefix
-		for _, ip := range []netip.Addr{v4, v6} {
-			if tsaddr.IsTailscaleIP(ip) {
-				bits := tsaddr.CGNATRange().Bits()
-				if ip.Is6() {
-					bits = tsaddr.TailscaleULARange().Bits()
-				}
-				routes = append(routes, netip.PrefixFrom(ip, bits))
-			}
-		}
-		if len(routes) == 0 {
-			return nil, errors.New("no tailnet router addresses")
-		}
-		return routes, nil
-	}
-	var deliver func([]byte) error
-	if cfg.Policy.UDP == "all" || cfg.Policy.ICMP {
-		deliver = s.WriteExitPacket
-	}
-	// Keep both TCP legs alive until the Tailnet stack has issued its resets.
+	// Keep flow contexts alive until the Tailnet stack has issued its resets.
 	flowCtx, stopFlows := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopFlows()
-	warp, e := bridge.NewRouted(flowCtx, cfg.Warp.ConfigPath, cfg.TCP.Send, cfg.TCP.Receive, cfg.Warp.PacketQueue, clientRoutes, deliver)
+	backend, e := configureEgress(flowCtx, cfg, s, up)
 	if e != nil {
 		return e
 	}
-	if deliver != nil {
-		s.NormalizeExitPacket = func(p *packet.Parsed) bool {
-			proto, frag := ipfragment.Protocol(p.Buffer())
-			if !frag || !tsaddr.IsTailscaleIP(p.Src.Addr()) || !policy.Allowed(netip.AddrPortFrom(p.Dst.Addr(), 1)) {
-				return true
-			}
-			if !(proto == 17 && cfg.Policy.UDP == "all" || (proto == 1 || proto == 58) && cfg.Policy.ICMP) {
-				return true
-			}
-			joined := warp.JoinClientFragments(p.Buffer())
-			if joined == nil {
-				return false
-			}
-			p.Decode(joined)
-			p.SourceFragmented = true
-			return true
-		}
-		s.ExitPacket = func(p *packet.Parsed) bool {
-			switch p.IPProto {
-			case ipproto.UDP:
-				if cfg.Policy.UDP != "all" {
-					return false
-				}
-			case ipproto.ICMPv4, ipproto.ICMPv6:
-				if !cfg.Policy.ICMP {
-					return false
-				}
-			default:
-				return false
-			}
-			warp.ForwardPacket(p.Src.Addr(), p.Dst.Addr(), p.Buffer(), p.SourceFragmented)
-			return true
-		}
-	}
-	s.ExitDNSForward = func(ctx context.Context, q []byte, src netip.AddrPort) ([]byte, error) {
-		answer, err := exit.PeerDNS(ctx, q, warp.DialTCP)
-		if !traceFlows {
-			return answer, err
-		}
-		if err != nil {
-			log.Printf("WARP peer DNS src=%s: %v", src, err)
-		} else {
-			log.Printf("WARP peer DNS src=%s rcode=%d bytes=%d", src, answer[3]&15, len(answer))
-		}
-		return answer, err
-	}
 	defer s.Close()
-	defer warp.Close()
+	if backend.close != nil {
+		defer backend.close()
+	}
 	defer func() {
 		if ctx.Err() != nil {
 			count := s.BeginExitTCPShutdown()
@@ -240,62 +179,7 @@ func run(ctx context.Context, cfg config) error {
 		}
 		stopFlows()
 	}()
-	var rejected atomic.Uint64
-	allow := func(proto string, src, dst netip.AddrPort) bool {
-		ready := warp.Ready()
-		ok := ready && policy.Allowed(dst) && (proto == "tcp" || dst.Port() == 53)
-		if !ok && traceFlows {
-			log.Printf("reject proto=%s src=%s dst=%s family=%s ready=%t rejects=%d", proto, src, dst, family(dst), ready, rejected.Add(1))
-		}
-		return ok
-	}
-	s.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
-		if !allow("tcp", src, dst) {
-			return nil, true
-		}
-		return func(c net.Conn) {
-			defer c.Close()
-			u, e := warp.DialTCP(flowCtx, dst)
-			if e != nil {
-				if traceFlows {
-					log.Printf("WARP TCP %s -> %s: %v", src, dst, e)
-				}
-				return
-			}
-			defer u.Close()
-			if traceFlows {
-				log.Printf("WARP TCP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
-				metrics.Buffers(c, u, src, dst)
-			}
-			up, down := exit.Relay(flowCtx, c, u)
-			if traceFlows {
-				metrics.TCP(c, src, dst, up, down)
-			}
-		}, true
-	})
-	s.RegisterFallbackUDPHandler(func(src, dst netip.AddrPort) (func(nettype.ConnPacketConn), bool) {
-		if !allow("udp", src, dst) {
-			return nil, true
-		}
-		return func(c nettype.ConnPacketConn) {
-			defer c.Close()
-			u, e := warp.DialUDP(dst)
-			if e != nil {
-				if traceFlows {
-					log.Printf("WARP UDP %s -> %s: %v", src, dst, e)
-				}
-				return
-			}
-			defer u.Close()
-			if traceFlows {
-				log.Printf("WARP UDP %s -> %s family=%s ready=%t", src, dst, family(dst), warp.Ready())
-			}
-			up, down := exit.DNS(c, u)
-			if traceFlows {
-				log.Printf("DNS %s -> %s up=%d down=%d", src, dst, up, down)
-			}
-		}, true
-	})
+	registerEgressHandlers(flowCtx, cfg, s, backend)
 	if _, e = s.Up(ctx); e != nil {
 		return e
 	}
@@ -309,21 +193,15 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("advertise exit routes: %w", e)
 	}
 	watchTestCC(ctx, s)
-	log.Printf("advertised exit routes hostname=%s cc=%s", cfg.Tailscale.Hostname, cfg.Congestion.Type)
+	log.Printf("advertised exit routes hostname=%s egress=%s cc=%s", cfg.Tailscale.Hostname, cfg.egressMode(), cfg.Congestion.Type)
 	<-ctx.Done()
 	return nil
-}
-func family(dst netip.AddrPort) string {
-	if dst.Addr().Is4() {
-		return "IPv4"
-	}
-	return "IPv6"
 }
 func main() {
 	path := flag.String("config", "config.example.yaml", "YAML configuration")
 	cc := flag.String("cc", "", "client-facing TCP congestion control: bbr, cubic, reno")
-	send := flag.Int("tcp-send-buffer", 0, "per-connection send buffer bytes on both TCP stacks (0 = native defaults)")
-	receive := flag.Int("tcp-receive-buffer", 0, "per-connection receive buffer bytes on both TCP stacks (0 = native defaults)")
+	send := flag.Int("tcp-send-buffer", 0, "per-connection send buffer bytes on the Tailscale and WARP stacks (0 = native defaults)")
+	receive := flag.Int("tcp-receive-buffer", 0, "per-connection receive buffer bytes on the Tailscale and WARP stacks (0 = native defaults)")
 	iw := flag.Int("bbr-initial-cwnd", 0, "BBR initial window in MSS (default 32)")
 	burst := flag.Int("bbr-pacing-burst", 0, "BBR maximum pacing quantum in MSS (default 1)")
 	flag.Parse()

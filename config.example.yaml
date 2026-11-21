@@ -7,6 +7,8 @@ tailscale:
   port: 0  # UDP listen port, 0 selects automatically
   hostname: warp-bbr-exit-mvp
   state_dir: ./state/tsnet
+egress:
+  mode: warp  # warp / direct; omit the warp section in direct mode
 warp:
   config_path: ./state/warp/config.json
   transport: masque-h3
@@ -24,7 +26,7 @@ congestion:
   max_pacing_bytes_per_second: 0  # per TCP sender; 0 uses BBR estimation
 tcp:
   shutdown_grace_period: 2s
-  # Per TCP endpoint, in bytes, on both the Tailscale and WARP stacks.
+  # Per TCP endpoint, in bytes, on the Tailscale stack and on the WARP stack when selected.
   # 0 keeps native defaults; explicit sizes range from 4096 to 67108864.
   send_buffer_bytes: 8388608
   receive_buffer_bytes: 4194304

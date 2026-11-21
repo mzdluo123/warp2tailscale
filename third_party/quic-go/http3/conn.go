@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -31,6 +32,7 @@ type rawConn struct {
 	logger *slog.Logger
 
 	enableDatagrams bool
+	useDatagramRing bool
 
 	streamMx sync.Mutex
 	streams  map[quic.StreamID]*stateTrackingStream
@@ -61,6 +63,7 @@ func newRawConn(
 		conn:              quicConn,
 		logger:            logger,
 		enableDatagrams:   enableDatagrams,
+		useDatagramRing:   enableDatagrams && os.Getenv("QUIC_GO_HTTP3_DATAGRAM_RING") == "true",
 		receivedSettings:  make(chan struct{}),
 		streams:           make(map[quic.StreamID]*stateTrackingStream),
 		qlogger:           qlogger,
@@ -117,6 +120,7 @@ func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
 	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
 
 	c.streamMx.Lock()
+	hstr.useRing = c.useDatagramRing
 	c.streams[str.StreamID()] = hstr
 	c.qloggerWG.Add(1)
 	c.streamMx.Unlock()

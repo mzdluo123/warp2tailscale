@@ -24,7 +24,9 @@ type stateTrackingStream struct {
 
 	sendDatagram func([]byte) error
 	hasData      chan struct{}
-	queue        *ringbuffer.RingBuffer[[]byte] // allocated on the first received datagram
+	queue        [][]byte
+	useRing      bool
+	ring         *ringbuffer.RingBuffer[[]byte]
 
 	mx      sync.Mutex
 	sendErr error
@@ -139,22 +141,35 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	if s.recvErr != nil {
 		return
 	}
-	if s.queue == nil {
-		s.queue = new(ringbuffer.RingBuffer[[]byte])
-		s.queue.Init(streamDatagramQueueLen)
+	if s.useRing {
+		if s.ring == nil {
+			s.ring = new(ringbuffer.RingBuffer[[]byte])
+			s.ring.Init(streamDatagramQueueLen)
+		}
+		if s.ring.Len() == streamDatagramQueueLen {
+			return
+		}
+		s.ring.PushBack(data)
+	} else {
+		if len(s.queue) == streamDatagramQueueLen {
+			return
+		}
+		s.queue = append(s.queue, data)
 	}
-	if s.queue.Len() == streamDatagramQueueLen {
-		return
-	}
-	s.queue.PushBack(data)
 	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()
-	if s.queue != nil && !s.queue.Empty() {
-		data := s.queue.PopFront()
+	if s.ring != nil && !s.ring.Empty() {
+		data := s.ring.PopFront()
+		s.mx.Unlock()
+		return data, nil
+	}
+	if len(s.queue) > 0 {
+		data := s.queue[0]
+		s.queue = s.queue[1:]
 		s.mx.Unlock()
 		return data, nil
 	}

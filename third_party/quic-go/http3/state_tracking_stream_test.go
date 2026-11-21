@@ -319,7 +319,7 @@ func TestDatagramSending(t *testing.T) {
 }
 
 func TestReceivedDatagramRingWrapAndOverflow(t *testing.T) {
-	s := &stateTrackingStream{hasData: make(chan struct{}, 1)}
+	s := &stateTrackingStream{hasData: make(chan struct{}, 1), useRing: true}
 	for i := range streamDatagramQueueLen {
 		s.enqueueDatagram([]byte{byte(i)})
 	}
@@ -344,7 +344,7 @@ func TestReceivedDatagramRingWrapAndOverflow(t *testing.T) {
 }
 
 func BenchmarkStreamDatagramQueue(b *testing.B) {
-	s := &stateTrackingStream{hasData: make(chan struct{}, 1)}
+	s := &stateTrackingStream{hasData: make(chan struct{}, 1), useRing: true}
 	payload := make([]byte, 1200)
 	for range streamDatagramQueueLen / 2 {
 		s.enqueueDatagram(payload)
@@ -356,5 +356,22 @@ func BenchmarkStreamDatagramQueue(b *testing.B) {
 		if _, err := s.ReceiveDatagram(ctx); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestDatagramRingSelection(t *testing.T) {
+	client, _ := newStreamPair(t)
+	for _, tc := range []struct {
+		setting string
+		enabled bool
+		want    bool
+	}{{"", true, false}, {"false", true, false}, {"true", false, false}, {"true", true, true}} {
+		t.Setenv("QUIC_GO_HTTP3_DATAGRAM_RING", tc.setting)
+		conn := newRawConn(nil, tc.enabled, nil, nil, nil, nil)
+		str := conn.TrackStream(client)
+		require.Equal(t, tc.want, str.useRing)
+		require.Nil(t, str.ring)
+		str.enqueueDatagram([]byte("datagram"))
+		require.Equal(t, tc.want, str.ring != nil)
 	}
 }

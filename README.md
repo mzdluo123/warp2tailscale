@@ -70,6 +70,7 @@ dig @100.100.100.100 example.com AAAA
 | `congestion.pacing_burst_packets` | 每次发包最多 1–32 个 MSS，0 使用栈默认值 1 | 24 |
 | `congestion.pacing_burst_window` | 0–10 ms，以当前速率限制每一批可提前发送的数据量，0 仅使用包数限制 | 1ms |
 | `congestion.max_pacing_bytes_per_second` | 每条客户端方向 TCP 的 pacing 速率上限，0 由 BBR 估算 | 0 |
+| `warp.http3_receive_ring` | 启用 32 槽 HTTP/3 数据报接收环形队列。两种队列的容量均为 32，重启生效。 | `false` |
 | `warp.packet_queue_packets` | WARP 出口队列容量，1–256 包，0 使用默认值 32 | 32 |
 | `runtime.max_procs` | Go 同时执行的逻辑处理器数，0 使用运行时默认值 | 1 |
 | `runtime.udp_gso` | `true` 允许 WireGuard 和 MASQUE 使用 UDP GSO，`false` 在本进程禁用。省略时沿用两个库的环境设置。重启后生效。 | `true` |
@@ -119,7 +120,7 @@ go test tailscale.com/wgengine/netstack/gro -run '^$' -bench '^BenchmarkTCPRecei
 
 在同一台 Linux 出口服务器上交替运行优化前后的版本，1200 字节 TCP 载荷的中位耗时从 438 ns 降到 170 ns，每包堆分配从 1 次降到 0 次。评估实际出口服务时，还需同时记录完整下载期间的服务 CPU 时间、下载字节数和负载下的 RTT。
 
-WARP 接收路径使用基于 quic-go v0.59.0 的本地版本。QUIC 接收队列接管解析器已复制的 DATAGRAM 载荷，HTTP/3 流在收到首个数据报时分配 32 槽环形队列。可单独测量这两段的每包耗时和分配量。
+WARP 接收路径使用基于 quic-go v0.59.0 的本地版本。QUIC 接收队列接管解析器已复制的 DATAGRAM 载荷，开启 `warp.http3_receive_ring` 时，HTTP/3 流在收到首个数据报时分配 32 槽环形队列。可单独测量这两段的每包耗时和分配量。
 
 ```sh
 (cd third_party/quic-go && go test -run '^$' -cpu 1 -benchmem \

@@ -12,6 +12,7 @@ warp:
   transport: masque-h3
   mtu: 1280
   packet_queue_packets: 32
+  http3_receive_ring: false  # opt in to the fixed 32-slot HTTP/3 DATAGRAM queue
   reconnect_delay: 1s
   fail_closed: true
 congestion:

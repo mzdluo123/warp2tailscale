@@ -87,3 +87,19 @@ func TestRoutingAndPacingConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTP3ReceiveRingConfig(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{{"warp: {}\n", false}, {"warp:\n  http3_receive_ring: false\n", false}, {"warp:\n  http3_receive_ring: true\n", true}} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(tc.data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := load(path)
+		if err != nil || cfg.Warp.HTTP3ReceiveRing != tc.want {
+			t.Fatalf("load(%q): ring=%t, err=%v", tc.data, cfg.Warp.HTTP3ReceiveRing, err)
+		}
+	}
+}

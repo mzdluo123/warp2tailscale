@@ -51,12 +51,13 @@ type config struct {
 		StateDir string `yaml:"state_dir"`
 	}
 	Warp struct {
-		ConfigPath     string `yaml:"config_path"`
-		Transport      string
-		PacketQueue    int `yaml:"packet_queue_packets"`
-		MTU            int
-		ReconnectDelay time.Duration `yaml:"reconnect_delay"`
-		FailClosed     bool          `yaml:"fail_closed"`
+		ConfigPath       string `yaml:"config_path"`
+		Transport        string
+		PacketQueue      int  `yaml:"packet_queue_packets"`
+		HTTP3ReceiveRing bool `yaml:"http3_receive_ring"`
+		MTU              int
+		ReconnectDelay   time.Duration `yaml:"reconnect_delay"`
+		FailClosed       bool          `yaml:"fail_closed"`
 	}
 	Congestion struct {
 		Type        string
@@ -138,6 +139,9 @@ func run(ctx context.Context, cfg config) error {
 				return err
 			}
 		}
+	}
+	if err := os.Setenv("QUIC_GO_HTTP3_DATAGRAM_RING", strconv.FormatBool(cfg.Warp.HTTP3ReceiveRing)); err != nil {
+		return err
 	}
 	traceFlows := !cfg.Logging.QuietFlows
 	s := &tsnet.Server{ExitBBRQuiet: cfg.Logging.QuietFlows, Hostname: cfg.Tailscale.Hostname, Port: cfg.Tailscale.Port, Dir: cfg.Tailscale.StateDir, AuthKey: os.Getenv("TS_AUTHKEY"), ExitTCPCC: cfg.Congestion.Type, ExitBBRInitialCwnd: cfg.Congestion.InitialCwnd, ExitBBRPacingBurst: cfg.Congestion.PacingBurst, ExitBBRBurstWindow: cfg.Congestion.BurstWindow, ExitBBRRateLimit: cfg.Congestion.RateLimit, ExitTCPSendBuffer: cfg.TCP.Send, ExitTCPReceiveBuffer: cfg.TCP.Receive}
